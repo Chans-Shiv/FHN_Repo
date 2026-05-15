@@ -1,59 +1,55 @@
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
-using Microsoft.Xrm.Sdk;
 using SqlToDataverseSync.Domain.Interfaces;
 using SqlToDataverseSync.Domain.Models;
 
 namespace SqlToDataverseSync.Infrastructure.DeadLetter;
 
 /// <summary>
-/// Writes permanently failed records to JSON files for manual review.
-/// Path: /home/dead-letter/{Module}_{timestamp}.json
+/// Emits dead-letter records as structured log events. On Azure Functions these flow
+/// to Application Insights via the Worker logger pipeline.
+///
+/// Query in App Insights (KQL):
+///   traces
+///   | where customDimensions.EventName == "DeadLetterRecord"
+///   | extend Module = tostring(customDimensions.Module),
+///            Key    = tostring(customDimensions.Key),
+///            Error  = tostring(customDimensions.Error)
 /// </summary>
 public class DeadLetterService : IDeadLetterService
 {
-    private static readonly string DeadLetterDir =
-        Path.Combine(Environment.GetEnvironmentVariable("HOME") ?? "/home", "dead-letter");
+    // Hard cap on per-record events per call to keep ingest volume bounded.
+    // A summary event still records the full count.
+    private const int MaxRecordsLogged = 500;
 
     private readonly ILogger<DeadLetterService> _logger;
 
     public DeadLetterService(ILogger<DeadLetterService> logger) => _logger = logger;
 
-    public async Task WriteAsync(string moduleName, List<FailedRecord> failures, CancellationToken ct = default)
+    public Task WriteAsync(string moduleName, List<FailedRecord> failures, CancellationToken ct = default)
     {
-        if (failures.Count == 0) return;
+        if (failures.Count == 0) return Task.CompletedTask;
 
-        try
+        _logger.LogError(
+            "EventName={EventName} Module={Module} FailedCount={Count}",
+            "DeadLetterSummary", moduleName, failures.Count);
+
+        var logged = 0;
+        foreach (var f in failures)
         {
-            Directory.CreateDirectory(DeadLetterDir);
-            var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-            var fileName = $"{moduleName}_{timestamp}.json";
-            var filePath = Path.Combine(DeadLetterDir, fileName);
+            if (logged++ >= MaxRecordsLogged) break;
 
-            var payload = new
-            {
-                Module = moduleName,
-                Timestamp = DateTime.UtcNow,
-                FailedRecordCount = failures.Count,
-                Records = failures.Select(f => new
-                {
-                    f.Key,
-                    f.ErrorMessage,
-                    Attributes = f.Entity?.Attributes?
-                        .ToDictionary(a => a.Key, a => a.Value?.ToString())
-                }).ToList()
-            };
-
-            var json = JsonSerializer.Serialize(payload,
-                new JsonSerializerOptions { WriteIndented = true });
-            await File.WriteAllTextAsync(filePath, json, ct);
-
-            _logger.LogWarning("[{Module}] Dead-lettered {Count} records to {Path}",
-                moduleName, failures.Count, filePath);
+            _logger.LogError(
+                "EventName={EventName} Module={Module} Key={Key} Error={Error}",
+                "DeadLetterRecord", moduleName, f.Key, f.ErrorMessage);
         }
-        catch (Exception ex)
+
+        if (failures.Count > MaxRecordsLogged)
         {
-            _logger.LogError(ex, "[{Module}] Failed to write dead-letter file", moduleName);
+            _logger.LogWarning(
+                "EventName={EventName} Module={Module} Suppressed={Suppressed}",
+                "DeadLetterTruncated", moduleName, failures.Count - MaxRecordsLogged);
         }
+
+        return Task.CompletedTask;
     }
 }

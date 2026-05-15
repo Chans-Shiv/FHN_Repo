@@ -24,7 +24,10 @@ public static class StagingEntityMapper
         entity["crbee_paddedaccountnum"] = record.AcctNumPadded;
         entity["crbee_monthkey"] = record.MthKey;
         entity["crbee_accountbalance"] = new Money(record.Balance);
-        entity["crbee_chargeoffindicator"] = new OptionSetValue(record.ChargeOffIndicator);
+        // OptionSet attributes only written when source had a real value.
+        // CommonTransformation.GetInt returns 0 for null/missing — 0 is unlikely to be a valid option.
+        if (record.ChargeOffIndicator != 0)
+            entity["crbee_chargeoffindicator"] = new OptionSetValue(record.ChargeOffIndicator);
         entity["crbee_costcenter"] = record.CostCenter;
         entity["crbee_customername"] = record.CustomerName;
         entity["crbee_collectionaddress"] = record.CollAddr;
@@ -37,7 +40,8 @@ public static class StagingEntityMapper
         entity["crbee_customerzipcode"] = record.CustZip;
         entity["crbee_loanidentifier"] = record.LoanIdentifier;
         entity["crbee_sourcesystem"] = record.SourceSystem;
-        entity["crbee_producttype"] = new OptionSetValue(record.Product);
+        if (record.Product != 0)
+            entity["crbee_producttype"] = new OptionSetValue(record.Product);
 
         return entity;
     }

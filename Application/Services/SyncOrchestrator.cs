@@ -77,6 +77,23 @@ public class SyncOrchestrator
         var sqlRowCount = await _sqlReader.GetRowCountForMthKeyAsync(maxMthKey, ct);
         var trackingState = await _tracking.LoadAsync(ct);
 
+        // New month resets abandonments — last month's failures don't apply to new data.
+        if (!string.IsNullOrEmpty(trackingState.Month) && trackingState.Month != maxMthKey.ToString())
+        {
+            _logger.LogInformation("Month changed {Old} → {New}. Clearing abandonment state.",
+                trackingState.Month, maxMthKey);
+            foreach (var m in trackingState.Modules.Values)
+            {
+                m.AbandonedAt = null;
+                m.ConsecutiveFailureDays = 0;
+            }
+            if (trackingState.Staging != null)
+            {
+                trackingState.Staging.AbandonedAt = null;
+                trackingState.Staging.ConsecutiveFailureDays = 0;
+            }
+        }
+
         if (trackingState.Month == maxMthKey.ToString()
             && trackingState.StagingLoadedCount == sqlRowCount
             && trackingState.SqlRowCount == sqlRowCount)
@@ -122,10 +139,30 @@ public class SyncOrchestrator
         _logger.LogInformation("Phase 3: Truncate staging + pre-warm module lookups (parallel)...");
         var orderedProcessors = _processors.OrderBy(p => p.Order).ToList();
 
+        // Skip processors whose tracking state has been abandoned via MaxConsecutiveFailureDays.
+        // Manual retries via /api/run-module/{name} still run (they bypass this filter).
+        var abandonedModules = trackingState.Modules
+            .Where(kvp => kvp.Value.AbandonedAt != null)
+            .Select(kvp => kvp.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var activeProcessors = orderedProcessors
+            .Where(p => !abandonedModules.Contains(p.ModuleName))
+            .ToList();
+
+        if (abandonedModules.Count > 0)
+        {
+            _logger.LogWarning(
+                "EventName={EventName} SkippedCount={Count} Modules={Modules}",
+                "AbandonedModuleSkipped", abandonedModules.Count, string.Join(",", abandonedModules));
+            foreach (var name in abandonedModules)
+                result.Errors.Add($"[{name}] Skipped — abandoned at {trackingState.Modules[name].AbandonedAt:o}");
+        }
+
         var truncateTask = _repository.DeleteByColumnValueAsync(
             StagingEntityMapper.EntityLogicalName, "crbee_monthkey", maxMthKey, ct);
 
-        var preWarmTasks = orderedProcessors.Select(async p =>
+        var preWarmTasks = activeProcessors.Select(async p =>
         {
             try { await p.PreWarmAsync(allRecords, ct); }
             catch (Exception ex)
@@ -141,8 +178,8 @@ public class SyncOrchestrator
         // ═══════════════════════════════════════════════
         // PHASE 4: Process batches — staging insert + module updates (parallel)
         // ═══════════════════════════════════════════════
-        _logger.LogInformation("Phase 4: Processing {Count} records through staging + {ModuleCount} modules...",
-            allRecords.Count, orderedProcessors.Count);
+        _logger.LogInformation("Phase 4: Processing {Count} records through staging + {ModuleCount} active modules...",
+            allRecords.Count, activeProcessors.Count);
 
         int stagingSucceeded = 0;
         int stagingFailed = 0;
@@ -163,7 +200,7 @@ public class SyncOrchestrator
             // Run staging insert + all module processors in parallel
             var stagingTask = _repository.BatchInsertAsync(stagingEntities, ct);
 
-            var moduleTasks = orderedProcessors.Select(async processor =>
+            var moduleTasks = activeProcessors.Select(async processor =>
             {
                 try
                 {
@@ -225,7 +262,15 @@ public class SyncOrchestrator
         // ═══════════════════════════════════════════════
         // PHASE 5: Save tracking state
         // ═══════════════════════════════════════════════
-        var newState = BuildTrackingState(maxMthKey, sqlRowCount, result, trackingState);
+        var newState = BuildTrackingState(maxMthKey, sqlRowCount, result, stagingFailures, trackingState);
+
+        // Carry forward state for abandoned modules we skipped this run, so their AbandonedAt sticks.
+        foreach (var name in abandonedModules)
+        {
+            if (!newState.Modules.ContainsKey(name) && trackingState.Modules.TryGetValue(name, out var prev))
+                newState.Modules[name] = prev;
+        }
+
         await _tracking.SaveAsync(newState, ct);
 
         sw.Stop();
@@ -282,12 +327,28 @@ public class SyncOrchestrator
         }
 
         result.ModuleResults[moduleName] = aggr;
+
+        if (aggr.Failures.Count > 0)
+            await _deadLetter.WriteAsync(moduleName, aggr.Failures, ct);
+
+        // Update tracking for this module only. Manual retries reset AbandonedAt on success
+        // and re-evaluate the consecutive-failure streak otherwise.
+        var previousState = await _tracking.LoadAsync(ct);
+        previousState.Modules[moduleName] = UpdateModuleTrackingState(
+            previousState.Modules.GetValueOrDefault(moduleName) ?? new ModuleTrackingState(),
+            aggr);
+        await _tracking.SaveAsync(previousState, ct);
+
         result.Duration = sw.Elapsed;
         return result;
     }
 
     private TrackingState BuildTrackingState(
-        int mthKey, long sqlRowCount, SyncResult result, TrackingState previousState)
+        int mthKey,
+        long sqlRowCount,
+        SyncResult result,
+        List<FailedRecord> stagingFailures,
+        TrackingState previousState)
     {
         var state = new TrackingState
         {
@@ -297,34 +358,72 @@ public class SyncOrchestrator
             LastRunDate = DateTime.UtcNow
         };
 
-        var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        // Staging: synthetic ModuleResult so it goes through the same abandonment pipeline.
+        var stagingPrev = previousState.Staging ?? new ModuleTrackingState();
+        var stagingPseudoResult = new ModuleResult
+        {
+            ModuleName = "Staging",
+            RowsUpdated = result.StagingRowsInserted,
+            RowsFailed = result.StagingRowsFailed,
+            Failures = stagingFailures
+        };
+        state.Staging = UpdateModuleTrackingState(stagingPrev, stagingPseudoResult);
+
+        // If staging was just abandoned, mark count as fully loaded so the daily check stops
+        // re-triggering full truncate-and-reloads of a permanently broken dataset.
+        if (state.Staging.AbandonedAt != null)
+            state.StagingLoadedCount = sqlRowCount;
 
         foreach (var (moduleName, moduleResult) in result.ModuleResults)
         {
             var prevModule = previousState.Modules.GetValueOrDefault(moduleName) ?? new ModuleTrackingState();
-            var moduleState = new ModuleTrackingState { SuccessCount = moduleResult.RowsUpdated };
-
-            if (moduleResult.Failures.Count > 0)
-            {
-                var failedKeys = moduleResult.Failures.Select(f => f.Key).ToList();
-                var hash = ComputeFailureHash(failedKeys);
-
-                if (hash == prevModule.LastFailedHash && prevModule.LastFailureDate != today)
-                    moduleState.ConsecutiveFailureDays = prevModule.ConsecutiveFailureDays + 1;
-                else if (hash != prevModule.LastFailedHash)
-                    moduleState.ConsecutiveFailureDays = 1;
-                else
-                    moduleState.ConsecutiveFailureDays = prevModule.ConsecutiveFailureDays;
-
-                moduleState.LastFailureDate = today;
-                moduleState.LastFailedHash = hash;
-                moduleState.LastFailedKeys = failedKeys;
-            }
-
-            state.Modules[moduleName] = moduleState;
+            state.Modules[moduleName] = UpdateModuleTrackingState(prevModule, moduleResult);
         }
 
         return state;
+    }
+
+    /// <summary>
+    /// Updates a ModuleTrackingState from the latest ModuleResult.
+    /// Handles consecutive-failure streak, hash comparison, and MaxConsecutiveFailureDays abandonment.
+    /// </summary>
+    private ModuleTrackingState UpdateModuleTrackingState(ModuleTrackingState prev, ModuleResult moduleResult)
+    {
+        var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var next = new ModuleTrackingState { SuccessCount = moduleResult.RowsUpdated };
+
+        if (moduleResult.Failures.Count == 0)
+        {
+            // Success — clear failure streak and any prior abandonment.
+            return next;
+        }
+
+        var failedKeys = moduleResult.Failures.Select(f => f.Key).ToList();
+        var hash = ComputeFailureHash(failedKeys);
+
+        if (hash == prev.LastFailedHash && prev.LastFailureDate != today)
+            next.ConsecutiveFailureDays = prev.ConsecutiveFailureDays + 1;
+        else if (hash != prev.LastFailedHash)
+            next.ConsecutiveFailureDays = 1;
+        else
+            next.ConsecutiveFailureDays = prev.ConsecutiveFailureDays;
+
+        next.LastFailureDate = today;
+        next.LastFailedHash = hash;
+        next.LastFailedKeys = failedKeys;
+
+        // Preserve prior abandonment; raise a new one when the threshold trips.
+        next.AbandonedAt = prev.AbandonedAt;
+        if (next.AbandonedAt == null && next.ConsecutiveFailureDays >= _settings.MaxConsecutiveFailureDays)
+        {
+            next.AbandonedAt = DateTime.UtcNow;
+            _logger.LogCritical(
+                "EventName={EventName} Module={Module} ConsecutiveDays={Days} FailedCount={Count} Hash={Hash}",
+                "ModuleAbandoned", moduleResult.ModuleName, next.ConsecutiveFailureDays,
+                failedKeys.Count, hash);
+        }
+
+        return next;
     }
 
     private static string ComputeFailureHash(List<string> failedKeys)

@@ -1,0 +1,126 @@
+[
+  {
+    "name": "ScheduledSync",
+    "scriptFile": "SqlToDataverseSync.dll",
+    "entryPoint": "SqlToDataverseSync.Functions.ScheduledSyncFunction.Run",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "timerInfo",
+        "direction": "In",
+        "type": "timerTrigger",
+        "schedule": "%SyncScheduleCron%",
+        "properties": {}
+      }
+    ]
+  },
+  {
+    "name": "TestConnections",
+    "scriptFile": "SqlToDataverseSync.dll",
+    "entryPoint": "SqlToDataverseSync.Functions.ManualSyncFunction.TestConnections",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Function",
+        "methods": [
+          "post"
+        ],
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  },
+  {
+    "name": "RunSync",
+    "scriptFile": "SqlToDataverseSync.dll",
+    "entryPoint": "SqlToDataverseSync.Functions.ManualSyncFunction.RunSync",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Function",
+        "methods": [
+          "post"
+        ],
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  },
+  {
+    "name": "RunModule",
+    "scriptFile": "SqlToDataverseSync.dll",
+    "entryPoint": "SqlToDataverseSync.Functions.ModuleSyncFunction.RunSingleModule",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Function",
+        "methods": [
+          "post"
+        ],
+        "route": "run-module/{moduleName}",
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  },
+  {
+    "name": "ListModules",
+    "scriptFile": "SqlToDataverseSync.dll",
+    "entryPoint": "SqlToDataverseSync.Functions.ModuleSyncFunction.ListModules",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Function",
+        "methods": [
+          "get"
+        ],
+        "route": "modules",
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  }
+]

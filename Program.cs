@@ -12,7 +12,7 @@ using SqlToDataverseSync.Infrastructure.SqlMi;
 using SqlToDataverseSync.Infrastructure.Tracking;
 
 var host = new HostBuilder()
-    .ConfigureFunctionsWorkerDefaults()
+    .ConfigureFunctionsWebApplication()
     .ConfigureServices((context, services) =>
     {
         // ── Configuration ──

@@ -48,6 +48,7 @@ public class TrackingState
     public long SqlRowCount { get; set; }
     public long StagingLoadedCount { get; set; }
     public DateTime LastRunDate { get; set; }
+    public ModuleTrackingState? Staging { get; set; }
     public Dictionary<string, ModuleTrackingState> Modules { get; set; } = new();
 }
 
@@ -58,4 +59,7 @@ public class ModuleTrackingState
     public string? LastFailureDate { get; set; }
     public string? LastFailedHash { get; set; }
     public List<string> LastFailedKeys { get; set; } = new();
+
+    /// <summary>Set when MaxConsecutiveFailureDays is reached. Subsequent scheduled runs skip this module.</summary>
+    public DateTime? AbandonedAt { get; set; }
 }

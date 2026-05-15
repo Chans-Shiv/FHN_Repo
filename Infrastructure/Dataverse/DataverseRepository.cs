@@ -1,5 +1,6 @@
 using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Extensions.Logging;
+using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Query;
@@ -185,11 +186,9 @@ public class DataverseRepository : IDataverseRepository
                 Criteria = new FilterExpression(LogicalOperator.And)
             };
 
-            // AccountNumber IN (chunk)
-            var inFilter = new FilterExpression(LogicalOperator.Or);
-            foreach (var val in chunk)
-                inFilter.AddCondition(keyColumn, ConditionOperator.Equal, val);
-            query.Criteria.AddFilter(inFilter);
+            // Single IN condition — cheaper than 500 OR-Equal conditions.
+            query.Criteria.AddCondition(
+                keyColumn, ConditionOperator.In, chunk.Cast<object>().ToArray());
 
             query.PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 };
 
@@ -200,9 +199,10 @@ public class DataverseRepository : IDataverseRepository
 
                 foreach (var entity in response.Entities)
                 {
-                    var key = entity.GetAttributeValue<string>(keyColumn)
-                              ?? entity.GetAttributeValue<object>(keyColumn)?.ToString()
-                              ?? string.Empty;
+                    // Type-safe extraction: GetAttributeValue<string> throws if column isn't a string.
+                    var key = entity.Contains(keyColumn)
+                        ? entity[keyColumn]?.ToString()
+                        : null;
 
                     if (!string.IsNullOrEmpty(key) && !result.ContainsKey(key))
                         result[key] = entity;
@@ -319,7 +319,7 @@ public class DataverseRepository : IDataverseRepository
                     {
                         failures.Add(new FailedRecord
                         {
-                            Key = entities[item.RequestIndex].Id.ToString(),
+                            Key = ExtractBusinessKey(entities[item.RequestIndex]),
                             ErrorMessage = item.Fault.Message,
                             Entity = entities[item.RequestIndex]
                         });
@@ -334,10 +334,37 @@ public class DataverseRepository : IDataverseRepository
             _logger.LogError(ex, "Entire batch failed ({Count} records)", entities.Count);
             return (0, entities.Select(e => new FailedRecord
             {
-                Key = e.Id.ToString(),
+                Key = ExtractBusinessKey(e),
                 ErrorMessage = ex.Message,
                 Entity = e
             }).ToList());
         }
+    }
+
+    /// <summary>
+    /// Extracts a stable business key for failure tracking + dead-letter telemetry.
+    /// Updates carry a real GUID; inserts (staging) start with Guid.Empty, so we fall back to
+    /// the first available business-key column on the entity.
+    /// </summary>
+    private static string ExtractBusinessKey(Entity entity)
+    {
+        if (entity.Id != Guid.Empty) return entity.Id.ToString();
+
+        // Composite key for staging is monthkey:accountkey — uniquely identifies a row.
+        var mthKey = entity.Contains("crbee_monthkey") ? entity["crbee_monthkey"]?.ToString() : null;
+        var acctKey = entity.Contains("crbee_accountkey") ? entity["crbee_accountkey"]?.ToString() : null;
+        if (!string.IsNullOrEmpty(mthKey) && !string.IsNullOrEmpty(acctKey))
+            return $"{mthKey}:{acctKey}";
+
+        foreach (var attr in new[] { "crbee_accountkey", "crbee_accountnumber", "crbee_accountid" })
+        {
+            if (entity.Contains(attr) && entity[attr] is not null)
+            {
+                var val = entity[attr]?.ToString();
+                if (!string.IsNullOrEmpty(val)) return val;
+            }
+        }
+
+        return Guid.Empty.ToString();
     }
 }

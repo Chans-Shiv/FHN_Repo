@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "SqlConnectionString": "Server=YOUR_SQL_MI.database.windows.net;Database=YOUR_DB;User Id=YOUR_USER;Password=YOUR_PASSWORD;Encrypt=True;TrustServerCertificate=True;",
+    "DataverseUrl": "https://YOUR_ORG.crm.dynamics.com",
+    "SyncScheduleCron": "0 0 2 * * *",
+    "SqlBatchSize": "10000",
+    "DataverseBatchSize": "1000",
+    "MaxParallelBatches": "5"
+  }
+}
