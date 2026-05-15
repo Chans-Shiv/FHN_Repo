@@ -24,6 +24,9 @@ var host = new HostBuilder()
             DataverseBatchSize = TryParseInt("DataverseBatchSize", 1_000),
             MaxParallelBatches = TryParseInt("MaxParallelBatches", 5),
             MaxConsecutiveFailureDays = TryParseInt("MaxConsecutiveFailureDays", 3),
+            TrackingStorageAccountUrl = GetRequired("TrackingStorageAccountUrl"),
+            TrackingContainerName = Environment.GetEnvironmentVariable("TrackingContainerName") ?? "sync-state",
+            TrackingBlobName = Environment.GetEnvironmentVariable("TrackingBlobName") ?? "tracking.json",
         };
         services.AddSingleton(settings);
 
@@ -31,7 +34,7 @@ var host = new HostBuilder()
         services.AddSingleton<DataverseConnectionFactory>();
         services.AddTransient<ISqlDataReader, SqlMiDataReader>();
         services.AddTransient<IDataverseRepository, DataverseRepository>();
-        services.AddTransient<ITrackingService, FileTrackingService>();
+        services.AddTransient<ITrackingService, BlobTrackingService>();
         services.AddTransient<IDeadLetterService, DeadLetterService>();
 
         // ── Module Processors (add new modules here) ──

@@ -72,7 +72,7 @@ Infrastructure/Dataverse/
 Infrastructure/
  DeadLetter/DeadLetterService.cs
  SqlMi/SqlMiDataReader.cs
- Tracking/TrackingAndDeadLetter.cs
+ Tracking/BlobTrackingService.cs
 obj/Debug/net8.0/
  .NETCoreApp,Version=v8.0.AssemblyAttributes.cs
  SqlToDataverseSync.AssemblyInfo.cs
@@ -81,8 +81,10 @@ Program.cs
 
 [metadataReferences]
 <NUGET>/
- azure.core/1.40.0/lib/net6.0/Azure.Core.dll
+ azure.core/1.43.0/lib/net6.0/Azure.Core.dll
  azure.identity/1.12.0/lib/netstandard2.0/Azure.Identity.dll
+ azure.storage.blobs/12.22.0/lib/net6.0/Azure.Storage.Blobs.dll
+ azure.storage.common/12.21.0/lib/net6.0/Azure.Storage.Common.dll
  google.protobuf/3.25.2/lib/net5.0/Google.Protobuf.dll
  grpc.core.api/2.60.0/lib/netstandard2.1/Grpc.Core.Api.dll
  grpc.net.client/2.60.0/lib/net8.0/Grpc.Net.Client.dll
@@ -93,7 +95,7 @@ Program.cs
  microsoft.azure.functions.worker.extensions.timer/4.3.1/lib/netstandard2.0/Microsoft.Azure.Functions.Worker.Extensions.Timer.dll
  microsoft.azure.functions.worker.grpc/1.16.0/lib/net7.0/Microsoft.Azure.Functions.Worker.Grpc.dll
  microsoft.azure.functions.worker/1.22.0/lib/net7.0/Microsoft.Azure.Functions.Worker.dll
- microsoft.bcl.asyncinterfaces/5.0.0/lib/netstandard2.1/Microsoft.Bcl.AsyncInterfaces.dll
+ microsoft.bcl.asyncinterfaces/6.0.0/lib/netstandard2.1/Microsoft.Bcl.AsyncInterfaces.dll
  microsoft.data.sqlclient/5.2.1/ref/net8.0/Microsoft.Data.SqlClient.dll
  microsoft.extensions.caching.abstractions/3.1.8/lib/netcoreapp3.1/Microsoft.Extensions.Caching.Abstractions.dll
  microsoft.extensions.caching.memory/3.1.8/lib/netcoreapp3.1/Microsoft.Extensions.Caching.Memory.dll
@@ -311,6 +313,7 @@ Program.cs
  system.diagnostics.eventlog/8.0.0/lib/net8.0/System.Diagnostics.EventLog.dll
  system.drawing.common/6.0.0/lib/net6.0/System.Drawing.Common.dll
  system.identitymodel.tokens.jwt/6.35.0/lib/net6.0/System.IdentityModel.Tokens.Jwt.dll
+ system.io.hashing/6.0.0/lib/net6.0/System.IO.Hashing.dll
  system.memory.data/1.0.2/lib/netstandard2.0/System.Memory.Data.dll
  system.runtime.caching/8.0.0/lib/net8.0/System.Runtime.Caching.dll
  system.security.cryptography.pkcs/6.0.1/lib/net6.0/System.Security.Cryptography.Pkcs.dll

@@ -8,6 +8,9 @@
     "SyncScheduleCron": "0 0 2 * * *",
     "SqlBatchSize": "10000",
     "DataverseBatchSize": "1000",
-    "MaxParallelBatches": "5"
+    "MaxParallelBatches": "5",
+    "TrackingStorageAccountUrl": "https://YOUR_STORAGE.blob.core.windows.net",
+    "TrackingContainerName": "sync-state",
+    "TrackingBlobName": "tracking.json"
   }
 }

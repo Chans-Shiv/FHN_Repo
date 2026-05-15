@@ -16,4 +16,13 @@ public class SyncSettings
 
     /// <summary>Maximum consecutive days of same-hash failures before dead-lettering.</summary>
     public int MaxConsecutiveFailureDays { get; set; } = 3;
+
+    /// <summary>HTTPS endpoint of the storage account hosting tracking.json (e.g., https://acct.blob.core.windows.net).</summary>
+    public string TrackingStorageAccountUrl { get; set; } = string.Empty;
+
+    /// <summary>Container holding the tracking blob. Created on first save if it doesn't exist.</summary>
+    public string TrackingContainerName { get; set; } = "sync-state";
+
+    /// <summary>Blob name for the serialized TrackingState.</summary>
+    public string TrackingBlobName { get; set; } = "tracking.json";
 }
