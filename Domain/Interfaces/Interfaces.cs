@@ -7,7 +7,6 @@ namespace SqlToDataverseSync.Domain.Interfaces;
 /// <summary>Streams rows from SQL MI in batches. Never loads full result set.</summary>
 public interface ISqlDataReader
 {
-    Task<bool> TestConnectionAsync(CancellationToken ct = default);
     Task<int> GetMaxMthKeyAsync(CancellationToken ct = default);
     Task<long> GetRowCountForMthKeyAsync(int mthKey, CancellationToken ct = default);
     IAsyncEnumerable<List<Dictionary<string, object?>>> StreamBatchesAsync(

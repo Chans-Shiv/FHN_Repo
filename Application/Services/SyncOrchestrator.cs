@@ -50,14 +50,6 @@ public class SyncOrchestrator
         _logger = logger;
     }
 
-    public async Task<(bool SqlOk, bool DataverseOk)> TestConnectionsAsync(CancellationToken ct = default)
-    {
-        var sqlOk = await _sqlReader.TestConnectionAsync(ct);
-        var dvOk = await _repository.ConnectAsync(ct);
-        _logger.LogInformation("Connections — SQL: {Sql}, Dataverse: {Dv}", sqlOk, dvOk);
-        return (sqlOk, dvOk);
-    }
-
     public async Task<SyncResult> ExecuteSyncAsync(CancellationToken ct = default)
     {
         var result = new SyncResult();
@@ -277,69 +269,6 @@ public class SyncOrchestrator
         result.Duration = sw.Elapsed;
         _logger.LogInformation("Sync complete. {Summary}", result.Summary);
 
-        return result;
-    }
-
-    /// <summary>Runs a single module by name (for manual retry).</summary>
-    public async Task<SyncResult> ExecuteModuleSyncAsync(
-        string moduleName, int? mthKeyOverride = null, CancellationToken ct = default)
-    {
-        var result = new SyncResult();
-        var sw = Stopwatch.StartNew();
-
-        var processor = _processors.FirstOrDefault(p =>
-            p.ModuleName.Equals(moduleName, StringComparison.OrdinalIgnoreCase));
-
-        if (processor is null)
-            throw new ArgumentException($"Module '{moduleName}' not found");
-
-        if (!await _repository.ConnectAsync(ct))
-            throw new InvalidOperationException("Dataverse connection failed");
-
-        var mthKey = mthKeyOverride ?? await _sqlReader.GetMaxMthKeyAsync(ct);
-        result.MthKey = mthKey;
-
-        // Read + transform
-        var allRecords = new List<Domain.Entities.ConsumerCreditRecord>();
-        await foreach (var sqlBatch in _sqlReader.StreamBatchesAsync(mthKey, _settings.SqlBatchSize, ct))
-        {
-            allRecords.AddRange(CommonTransformation.TransformBatch(sqlBatch));
-            result.TotalRowsRead += sqlBatch.Count;
-        }
-
-        // Pre-warm + process
-        await processor.PreWarmAsync(allRecords, ct);
-
-        var batches = allRecords
-            .Select((r, i) => new { Record = r, Index = i })
-            .GroupBy(x => x.Index / _settings.SqlBatchSize)
-            .Select(g => g.Select(x => x.Record).ToList())
-            .ToList();
-
-        var aggr = new ModuleResult { ModuleName = moduleName };
-        foreach (var batch in batches)
-        {
-            var mr = await processor.ProcessBatchAsync(batch, ct);
-            aggr.RowsUpdated += mr.RowsUpdated;
-            aggr.RowsFailed += mr.RowsFailed;
-            aggr.RowsSkipped += mr.RowsSkipped;
-            aggr.Failures.AddRange(mr.Failures);
-        }
-
-        result.ModuleResults[moduleName] = aggr;
-
-        if (aggr.Failures.Count > 0)
-            await _deadLetter.WriteAsync(moduleName, aggr.Failures, ct);
-
-        // Update tracking for this module only. Manual retries reset AbandonedAt on success
-        // and re-evaluate the consecutive-failure streak otherwise.
-        var previousState = await _tracking.LoadAsync(ct);
-        previousState.Modules[moduleName] = UpdateModuleTrackingState(
-            previousState.Modules.GetValueOrDefault(moduleName) ?? new ModuleTrackingState(),
-            aggr);
-        await _tracking.SaveAsync(previousState, ct);
-
-        result.Duration = sw.Elapsed;
         return result;
     }
 

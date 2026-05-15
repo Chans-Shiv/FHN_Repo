@@ -18,22 +18,6 @@ public class SqlMiDataReader : ISqlDataReader
         _logger = logger;
     }
 
-    public async Task<bool> TestConnectionAsync(CancellationToken ct = default)
-    {
-        try
-        {
-            await using var conn = new SqlConnection(_settings.SqlConnectionString);
-            await conn.OpenAsync(ct);
-            _logger.LogInformation("SQL MI connected. Server={Server}, DB={Db}", conn.DataSource, conn.Database);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "SQL MI connection FAILED");
-            return false;
-        }
-    }
-
     public async Task<int> GetMaxMthKeyAsync(CancellationToken ct = default)
     {
         await using var conn = new SqlConnection(_settings.SqlConnectionString);

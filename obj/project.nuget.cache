@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "dgSpecHash": "NV16OpXuVEE=",
+  "dgSpecHash": "boU/R0fe/W0=",
   "success": true,
   "projectFilePath": "/Users/shivamchandra/Downloads/SqlToDataverseSync/SqlToDataverseSync.csproj",
   "expectedPackageFiles": [
@@ -14,9 +14,6 @@
     "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker/1.22.0/microsoft.azure.functions.worker.1.22.0.nupkg.sha512",
     "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker.core/1.18.0/microsoft.azure.functions.worker.core.1.18.0.nupkg.sha512",
     "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker.extensions.abstractions/1.3.0/microsoft.azure.functions.worker.extensions.abstractions.1.3.0.nupkg.sha512",
-    "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker.extensions.http/3.2.0/microsoft.azure.functions.worker.extensions.http.3.2.0.nupkg.sha512",
-    "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker.extensions.http.aspnetcore/1.3.2/microsoft.azure.functions.worker.extensions.http.aspnetcore.1.3.2.nupkg.sha512",
-    "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker.extensions.http.aspnetcore.analyzers/1.0.2/microsoft.azure.functions.worker.extensions.http.aspnetcore.analyzers.1.0.2.nupkg.sha512",
     "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker.extensions.timer/4.3.1/microsoft.azure.functions.worker.extensions.timer.4.3.1.nupkg.sha512",
     "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker.grpc/1.16.0/microsoft.azure.functions.worker.grpc.1.16.0.nupkg.sha512",
     "/Users/shivamchandra/.nuget/packages/microsoft.azure.functions.worker.sdk/1.17.4/microsoft.azure.functions.worker.sdk.1.17.4.nupkg.sha512",
