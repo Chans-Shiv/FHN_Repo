@@ -14,6 +14,13 @@ public class SyncSettings
     /// <summary>Concurrent Dataverse batch requests per processor. 5 procs × 5 slots = 25 peak.</summary>
     public int MaxParallelBatches { get; set; } = 5;
 
+    /// <summary>
+    /// Concurrent Dataverse batch requests used only by the staging truncate (DeleteAllAsync).
+    /// Truncate runs alone, so we can push higher than MaxParallelBatches without exceeding
+    /// the Dataverse concurrency limit (~52 / server). Polly handles transient 429s.
+    /// </summary>
+    public int DeleteParallelism { get; set; } = 15;
+
     /// <summary>Maximum consecutive days of same-hash failures before dead-lettering.</summary>
     public int MaxConsecutiveFailureDays { get; set; } = 3;
 

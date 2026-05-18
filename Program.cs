@@ -23,6 +23,7 @@ var host = new HostBuilder()
             SqlBatchSize = TryParseInt("SqlBatchSize", 10_000),
             DataverseBatchSize = TryParseInt("DataverseBatchSize", 1_000),
             MaxParallelBatches = TryParseInt("MaxParallelBatches", 5),
+            DeleteParallelism = TryParseInt("DeleteParallelism", 15),
             MaxConsecutiveFailureDays = TryParseInt("MaxConsecutiveFailureDays", 3),
             TrackingStorageAccountUrl = GetRequired("TrackingStorageAccountUrl"),
             TrackingContainerName = Environment.GetEnvironmentVariable("TrackingContainerName") ?? "sync-state",

@@ -18,20 +18,6 @@ public class SqlMiDataReader : ISqlDataReader
         _logger = logger;
     }
 
-    public async Task<int> GetMaxMthKeyAsync(CancellationToken ct = default)
-    {
-        await using var conn = new SqlConnection(_settings.SqlConnectionString);
-        await conn.OpenAsync(ct);
-        await using var cmd = new SqlCommand(
-            "SELECT Max(MTH_KEY) FROM dbo.ConsumerCreditDataAcq", conn)
-        { CommandTimeout = 30 };
-
-        var result = await cmd.ExecuteScalarAsync(ct);
-        var mthKey = result is not null && result != DBNull.Value ? Convert.ToInt32(result) : 0;
-        _logger.LogInformation("Max MTH_KEY in SQL: {MthKey}", mthKey);
-        return mthKey;
-    }
-
     public async Task<long> GetRowCountForMthKeyAsync(int mthKey, CancellationToken ct = default)
     {
         await using var conn = new SqlConnection(_settings.SqlConnectionString);

@@ -7,7 +7,6 @@ namespace SqlToDataverseSync.Domain.Interfaces;
 /// <summary>Streams rows from SQL MI in batches. Never loads full result set.</summary>
 public interface ISqlDataReader
 {
-    Task<int> GetMaxMthKeyAsync(CancellationToken ct = default);
     Task<long> GetRowCountForMthKeyAsync(int mthKey, CancellationToken ct = default);
     IAsyncEnumerable<List<Dictionary<string, object?>>> StreamBatchesAsync(
         int mthKey, int batchSize, CancellationToken ct = default);
@@ -21,8 +20,7 @@ public interface IDataverseRepository
         List<Entity> entities, CancellationToken ct = default);
     Task<(int Succeeded, int Failed, List<FailedRecord> Failures)> BatchUpdateAsync(
         List<Entity> entities, CancellationToken ct = default);
-    Task<int> DeleteByColumnValueAsync(
-        string entityName, string columnName, object value, CancellationToken ct = default);
+    Task<int> DeleteAllAsync(string entityName, CancellationToken ct = default);
     Task<Dictionary<string, Entity>> QueryByKeysAsync(
         string entityName, string keyColumn, List<string> keyValues,
         string[] columnsToRetrieve, string? additionalFilter = null,

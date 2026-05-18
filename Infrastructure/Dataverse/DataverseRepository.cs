@@ -87,23 +87,65 @@ public class DataverseRepository : IDataverseRepository
     }
 
     // ═══════════════════════════════════════════════════
-    // DELETE by column value (for staging truncation)
+    // DELETE ALL (full staging truncate, no filter)
     // ═══════════════════════════════════════════════════
+    //
+    // Two phases, both heavily logged so the operator can watch progress:
+    //   Phase A — retrieve every record ID in the table, paged at 5000.
+    //   Phase B — issue ExecuteMultipleRequest deletes in chunks of DataverseBatchSize,
+    //             with DeleteParallelism concurrent batches. Polly retries 429/503.
+    //
+    // For ~142K rows this used to take >30 min because parallelism was capped at 5.
+    // Bumping DeleteParallelism (default 15) and surfacing progress logs lets us
+    // see exactly which batch is running and tune further if 429s start appearing.
 
-    public async Task<int> DeleteByColumnValueAsync(
-        string entityName, string columnName, object value, CancellationToken ct = default)
+    public async Task<int> DeleteAllAsync(string entityName, CancellationToken ct = default)
     {
         var client = await _factory.GetClientAsync(ct);
-        int totalDeleted = 0;
+        var overallSw = System.Diagnostics.Stopwatch.StartNew();
 
-        // Retrieve all record IDs matching the filter, page by page
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} Parallelism={Parallelism} BatchSize={BatchSize}",
+            "TruncateStarted", entityName, _settings.DeleteParallelism, _settings.DataverseBatchSize);
+
+        // ── Phase A: page through the table and collect IDs ──
+        var allIds = await RetrieveAllIdsAsync(client, entityName, ct);
+
+        if (allIds.Count == 0)
+        {
+            _logger.LogInformation(
+                "EventName={EventName} Table={Table} Reason=AlreadyEmpty",
+                "TruncateComplete", entityName);
+            return 0;
+        }
+
+        // ── Phase B: parallel batched deletes ──
+        var totalDeleted = await DeleteIdsInBatchesAsync(client, entityName, allIds, ct);
+
+        overallSw.Stop();
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} Deleted={Deleted}/{Total} ElapsedSec={Elapsed:F1} Rate={Rate:F0}/s",
+            "TruncateComplete", entityName, totalDeleted, allIds.Count,
+            overallSw.Elapsed.TotalSeconds,
+            totalDeleted / Math.Max(overallSw.Elapsed.TotalSeconds, 0.001));
+
+        return totalDeleted;
+    }
+
+    /// <summary>
+    /// Phase A of truncate — paged ID retrieval. Dataverse pages are sequential
+    /// (PagingCookie chain), so this can't be parallelised. We log per page so
+    /// the operator sees progress instead of a black hole.
+    /// </summary>
+    private async Task<List<Guid>> RetrieveAllIdsAsync(
+        ServiceClient client, string entityName, CancellationToken ct)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         var query = new QueryExpression(entityName)
         {
-            ColumnSet = new ColumnSet(false), // Only need IDs
-            Criteria = new FilterExpression()
+            ColumnSet = new ColumnSet(false), // We only need Id — fastest projection
+            PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
         };
-        query.Criteria.AddCondition(columnName, ConditionOperator.Equal, value);
-        query.PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 };
 
         var allIds = new List<Guid>();
         EntityCollection response;
@@ -111,52 +153,88 @@ public class DataverseRepository : IDataverseRepository
         {
             response = await client.RetrieveMultipleAsync(query, ct);
             allIds.AddRange(response.Entities.Select(e => e.Id));
+
+            _logger.LogInformation(
+                "EventName={EventName} Table={Table} Page={Page} PageRows={PageRows} Cumulative={Cumulative} ElapsedSec={Elapsed:F1}",
+                "TruncateRetrievePage", entityName, query.PageInfo.PageNumber,
+                response.Entities.Count, allIds.Count, sw.Elapsed.TotalSeconds);
+
             query.PageInfo.PageNumber++;
             query.PageInfo.PagingCookie = response.PagingCookie;
         } while (response.MoreRecords);
 
-        if (allIds.Count == 0) return 0;
+        sw.Stop();
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} TotalIds={Total} Pages={Pages} ElapsedSec={Elapsed:F1}",
+            "TruncateRetrieveComplete", entityName, allIds.Count, query.PageInfo.PageNumber - 1,
+            sw.Elapsed.TotalSeconds);
 
-        _logger.LogInformation("Deleting {Count} records from {Table} where {Column}={Value}",
-            allIds.Count, entityName, columnName, value);
+        return allIds;
+    }
 
-        // Delete in batches using ExecuteMultipleRequest
-        var chunks = allIds
+    /// <summary>
+    /// Phase B of truncate — parallel ExecuteMultipleRequest deletes.
+    /// Throttled by DeleteParallelism (not MaxParallelBatches) so the truncate
+    /// can be tuned independently of the per-processor write parallelism.
+    /// </summary>
+    private async Task<int> DeleteIdsInBatchesAsync(
+        ServiceClient client, string entityName, List<Guid> ids, CancellationToken ct)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int totalDeleted = 0;
+        int batchesCompleted = 0;
+
+        // Slice the IDs into ExecuteMultiple-sized chunks.
+        var chunks = ids
             .Select((id, i) => new { id, i })
             .GroupBy(x => x.i / _settings.DataverseBatchSize)
             .Select(g => g.Select(x => x.id).ToList())
             .ToList();
 
-        using var semaphore = new SemaphoreSlim(_settings.MaxParallelBatches);
-        var tasks = chunks.Select(async chunk =>
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} TotalBatches={Batches} Parallelism={Parallelism}",
+            "TruncateDeleteStarted", entityName, chunks.Count, _settings.DeleteParallelism);
+
+        using var semaphore = new SemaphoreSlim(_settings.DeleteParallelism);
+        var tasks = chunks.Select(async (chunk, idx) =>
         {
             await semaphore.WaitAsync(ct);
+            var batchSw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
+                // One ExecuteMultipleRequest carrying up to DataverseBatchSize DeleteRequests.
+                // Counts as a single throttled call against Dataverse's 6000 req / 5 min limit.
                 var request = new ExecuteMultipleRequest
                 {
                     Settings = new ExecuteMultipleSettings { ContinueOnError = true, ReturnResponses = false },
                     Requests = new OrganizationRequestCollection()
                 };
-
                 foreach (var id in chunk)
-                    request.Requests.Add(new DeleteRequest
-                    {
-                        Target = new EntityReference(entityName, id)
-                    });
+                    request.Requests.Add(new DeleteRequest { Target = new EntityReference(entityName, id) });
 
                 await _retryPipeline.ExecuteAsync(async token =>
                 {
                     await client.ExecuteAsync(request, token);
                 }, ct);
 
-                Interlocked.Add(ref totalDeleted, chunk.Count);
+                var newTotal = Interlocked.Add(ref totalDeleted, chunk.Count);
+                var newCompleted = Interlocked.Increment(ref batchesCompleted);
+
+                _logger.LogInformation(
+                    "EventName={EventName} Table={Table} Batch={Batch}/{Total} BatchRows={BatchRows} Cumulative={Cumulative} BatchMs={BatchMs} ElapsedSec={Elapsed:F1}",
+                    "TruncateDeleteBatch", entityName, newCompleted, chunks.Count,
+                    chunk.Count, newTotal, batchSw.ElapsedMilliseconds, sw.Elapsed.TotalSeconds);
             }
             finally { semaphore.Release(); }
         });
 
         await Task.WhenAll(tasks);
-        _logger.LogInformation("Deleted {Count} records from {Table}", totalDeleted, entityName);
+
+        sw.Stop();
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} Deleted={Deleted} BatchesRun={Batches} ElapsedSec={Elapsed:F1}",
+            "TruncateDeleteComplete", entityName, totalDeleted, chunks.Count, sw.Elapsed.TotalSeconds);
+
         return totalDeleted;
     }
 
@@ -225,8 +303,11 @@ public class DataverseRepository : IDataverseRepository
     {
         if (entities.Count == 0) return (0, 0, new List<FailedRecord>());
 
+        var op = isInsert ? "Insert" : "Update";
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         int totalSucceeded = 0;
         int totalFailed = 0;
+        int batchesCompleted = 0;
         var allFailures = new List<FailedRecord>();
 
         var chunks = entities
@@ -235,22 +316,39 @@ public class DataverseRepository : IDataverseRepository
             .Select(g => g.Select(x => x.Entity).ToList())
             .ToList();
 
+        _logger.LogInformation(
+            "EventName={EventName} Op={Op} Entities={Entities} Batches={Batches} Parallelism={Parallelism}",
+            "BatchOpStarted", op, entities.Count, chunks.Count, _settings.MaxParallelBatches);
+
         using var semaphore = new SemaphoreSlim(_settings.MaxParallelBatches);
 
         var tasks = chunks.Select(async (chunk, chunkIdx) =>
         {
             await semaphore.WaitAsync(ct);
+            var batchSw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var (s, f, failures) = await ExecuteChunkWithRetryAsync(chunk, chunkIdx, isInsert, ct);
                 Interlocked.Add(ref totalSucceeded, s);
                 Interlocked.Add(ref totalFailed, f);
                 lock (allFailures) { allFailures.AddRange(failures); }
+
+                var newCompleted = Interlocked.Increment(ref batchesCompleted);
+                _logger.LogInformation(
+                    "EventName={EventName} Op={Op} Batch={Batch}/{Total} Succeeded={Succeeded} Failed={Failed} BatchMs={BatchMs} ElapsedSec={Elapsed:F1}",
+                    "BatchOpBatch", op, newCompleted, chunks.Count, s, f,
+                    batchSw.ElapsedMilliseconds, sw.Elapsed.TotalSeconds);
             }
             finally { semaphore.Release(); }
         });
 
         await Task.WhenAll(tasks);
+
+        sw.Stop();
+        _logger.LogInformation(
+            "EventName={EventName} Op={Op} Succeeded={Succeeded} Failed={Failed} ElapsedSec={Elapsed:F1}",
+            "BatchOpComplete", op, totalSucceeded, totalFailed, sw.Elapsed.TotalSeconds);
+
         return (totalSucceeded, totalFailed, allFailures);
     }
 
