@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("SqlToDataverseSync")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+cbc4a1c7d1ab32cff6e69dcf08dc95c459742515")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9af2885c88a7c32f0bb44155e53637a6e37f6049")]
 [assembly: System.Reflection.AssemblyProductAttribute("SqlToDataverseSync")]
 [assembly: System.Reflection.AssemblyTitleAttribute("SqlToDataverseSync")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
