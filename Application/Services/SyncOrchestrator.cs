@@ -198,17 +198,40 @@ public class SyncOrchestrator
                 "TruncateSkipped", StagingEntityMapper.EntityLogicalName);
 
         // Pre-warm tasks fan out concurrently with the truncate (and with each other).
+        // Each task captures its own success/failure so we can fail-fast below — without
+        // this guard, a pre-warm auth failure cascades into 142K doomed staging inserts.
         var preWarmTasks = activeProcessors.Select(async p =>
         {
-            try { await p.PreWarmAsync(matchKeys, ct); }
+            try
+            {
+                await p.PreWarmAsync(matchKeys, ct);
+                return (Module: p.ModuleName, Ok: true, Error: (string?)null);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[{Module}] Pre-warm FAILED", p.ModuleName);
                 result.Errors.Add($"[{p.ModuleName}] Pre-warm: {ex.Message}");
+                return (Module: p.ModuleName, Ok: false, Error: (string?)ex.Message);
             }
-        });
+        }).ToList();
 
         await Task.WhenAll(new Task[] { truncateTask }.Concat(preWarmTasks));
+
+        // Inspect pre-warm outcomes. Any failure means we don't have a valid lookup
+        // dict for that module — proceeding would either silently skip every row or
+        // hit the same auth error 142K times. Abort instead.
+        var preWarmResults = await Task.WhenAll(preWarmTasks);
+        var preWarmFailed = preWarmResults.Where(r => !r.Ok).Select(r => r.Module).ToList();
+        if (preWarmFailed.Count > 0)
+        {
+            _logger.LogCritical(
+                "EventName={EventName} FailedModules={Modules} Action=AbortSync",
+                "PreWarmAborted", string.Join(",", preWarmFailed));
+
+            result.Duration = sw.Elapsed;
+            return result;
+        }
+
         _logger.LogInformation(
             "EventName={EventName} Table={Table} ActiveProcessors={Count} TruncateRan={Ran}",
             "Phase3Complete", StagingEntityMapper.EntityLogicalName,
