@@ -33,6 +33,47 @@ public class SqlMiDataReader : ISqlDataReader
         return count;
     }
 
+    public async IAsyncEnumerable<string> StreamAccountNumbersAsync(
+        int mthKey,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        // Lightweight projection — single column, no ORDER BY — so the key-collection
+        // pass before pre-warm is much cheaper than the full StreamBatchesAsync.
+        await using var connection = new SqlConnection(_settings.SqlConnectionString);
+        await connection.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(
+            "SELECT ACCT_NUM FROM dbo.ConsumerCreditDataAcq WHERE MTH_KEY = @MthKey",
+            connection)
+        { CommandTimeout = 600 };
+        cmd.Parameters.AddWithValue("@MthKey", mthKey);
+
+        await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess, ct);
+
+        long rowCount = 0;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (await reader.ReadAsync(ct))
+        {
+            if (reader.IsDBNull(0)) continue;
+            var raw = reader.GetValue(0)?.ToString();
+            if (string.IsNullOrEmpty(raw)) continue;
+
+            rowCount++;
+            yield return raw;
+
+            // Heartbeat every 25K rows so the operator sees progress on big tables.
+            if (rowCount % 25_000 == 0)
+                _logger.LogInformation(
+                    "EventName={EventName} Rows={Rows} ElapsedSec={Elapsed:F1}",
+                    "SqlKeyStreamProgress", rowCount, sw.Elapsed.TotalSeconds);
+        }
+
+        sw.Stop();
+        _logger.LogInformation(
+            "EventName={EventName} Rows={Rows} ElapsedSec={Elapsed:F1}",
+            "SqlKeyStreamComplete", rowCount, sw.Elapsed.TotalSeconds);
+    }
+
     public async IAsyncEnumerable<List<Dictionary<string, object?>>> StreamBatchesAsync(
         int mthKey, int batchSize,
         [EnumeratorCancellation] CancellationToken ct = default)

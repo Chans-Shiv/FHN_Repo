@@ -127,45 +127,37 @@ public class SyncOrchestrator
         }
 
         // ═══════════════════════════════════════════════
-        // PHASE 2: Stream SQL rows + apply common transformation in memory
+        // PHASE 2: First SQL pass — build match-key set for pre-warm
         // ───────────────────────────────────────────────
-        // SqlMiDataReader yields batches of size SqlBatchSize so we never hold the
-        // whole result set in the SQL client. Each batch is transformed eagerly and
-        // appended to allRecords. Memory peaks at ~284 MB for 142K rows.
+        // Lightweight SELECT ACCT_NUM scan. We strip leading zeros via CommonTransformation
+        // so the resulting set matches what each processor's GetMatchKey returns. Holding
+        // only string keys (not full records) keeps memory minimal for the streaming Phase 4.
         // ═══════════════════════════════════════════════
         var phase2Sw = Stopwatch.StartNew();
         _logger.LogInformation(
-            "EventName={EventName} MaxMthKey={MaxMthKey} SqlBatchSize={SqlBatchSize}",
-            "Phase2Started", maxMthKey, _settings.SqlBatchSize);
+            "EventName={EventName} MaxMthKey={MaxMthKey}",
+            "Phase2KeysStarted", maxMthKey);
 
-        var allRecords = new List<Domain.Entities.ConsumerCreditRecord>();
-        int sqlBatchesRead = 0;
-        await foreach (var sqlBatch in _sqlReader.StreamBatchesAsync(maxMthKey, _settings.SqlBatchSize, ct))
+        var matchKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await foreach (var raw in _sqlReader.StreamAccountNumbersAsync(maxMthKey, ct))
         {
-            var transformed = CommonTransformation.TransformBatch(sqlBatch);
-            allRecords.AddRange(transformed);
-            result.TotalRowsRead += sqlBatch.Count;
-            sqlBatchesRead++;
-
-            _logger.LogInformation(
-                "EventName={EventName} Batch={Batch} BatchRows={BatchRows} Cumulative={Cumulative} ElapsedSec={Elapsed:F1}",
-                "Phase2SqlBatch", sqlBatchesRead, sqlBatch.Count, allRecords.Count,
-                phase2Sw.Elapsed.TotalSeconds);
+            var stripped = CommonTransformation.StripLeadingZeros(raw.Trim());
+            if (!string.IsNullOrEmpty(stripped))
+                matchKeys.Add(stripped);
         }
 
         phase2Sw.Stop();
         _logger.LogInformation(
-            "EventName={EventName} Records={Count} Batches={Batches} ElapsedSec={Elapsed:F1}",
-            "Phase2Complete", allRecords.Count, sqlBatchesRead, phase2Sw.Elapsed.TotalSeconds);
+            "EventName={EventName} UniqueKeys={Keys} ElapsedSec={Elapsed:F1}",
+            "Phase2KeysComplete", matchKeys.Count, phase2Sw.Elapsed.TotalSeconds);
 
         // ═══════════════════════════════════════════════
-        // PHASE 3: In parallel — full truncate of staging + pre-warm module lookups
+        // PHASE 3: Conditional truncate + parallel pre-warm
         // ───────────────────────────────────────────────
-        // Truncate is unfiltered: every row in crbee_stg_consumercreditdata goes,
-        // regardless of crbee_monthkey. The user's contract is that staging always
-        // reflects only the current MaxMonth load.
-        //
-        // Pre-warm reads module tables (not staging), so the two run safely in parallel.
+        // - IsTableEmptyAsync first: skip DeleteAllAsync when staging is already empty
+        //   (first run / after a clean prior run). Saves the >30 min full-table scan.
+        // - Pre-warm reads module tables (not staging) using the match-key set, with
+        //   parallelism inside QueryByKeysAsync controlled by PreWarmParallelism.
         // ═══════════════════════════════════════════════
         _logger.LogInformation(
             "EventName={EventName} Table={Table}",
@@ -174,7 +166,6 @@ public class SyncOrchestrator
         var orderedProcessors = _processors.OrderBy(p => p.Order).ToList();
 
         // Skip processors whose tracking state has been abandoned via MaxConsecutiveFailureDays.
-        // Manual retries via /api/run-module/{name} still run (they bypass this filter).
         var abandonedModules = trackingState.Modules
             .Where(kvp => kvp.Value.AbandonedAt != null)
             .Select(kvp => kvp.Key)
@@ -193,14 +184,23 @@ public class SyncOrchestrator
                 result.Errors.Add($"[{name}] Skipped — abandoned at {trackingState.Modules[name].AbandonedAt:o}");
         }
 
-        // Fire-and-await: truncate is a separate task so the pre-warm queries can
-        // begin in parallel. Detailed progress logs live inside DeleteAllAsync —
-        // grep App Insights for EventName=TruncateRetrievePage / TruncateDeleteBatch.
-        var truncateTask = _repository.DeleteAllAsync(StagingEntityMapper.EntityLogicalName, ct);
+        // Cheap top-1 check before kicking off the expensive truncate path.
+        var stagingHasRows = !await _repository.IsTableEmptyAsync(
+            StagingEntityMapper.EntityLogicalName, ct);
 
+        Task<int> truncateTask = stagingHasRows
+            ? _repository.DeleteAllAsync(StagingEntityMapper.EntityLogicalName, ct)
+            : Task.FromResult(0);
+
+        if (!stagingHasRows)
+            _logger.LogInformation(
+                "EventName={EventName} Table={Table} Reason=AlreadyEmpty",
+                "TruncateSkipped", StagingEntityMapper.EntityLogicalName);
+
+        // Pre-warm tasks fan out concurrently with the truncate (and with each other).
         var preWarmTasks = activeProcessors.Select(async p =>
         {
-            try { await p.PreWarmAsync(allRecords, ct); }
+            try { await p.PreWarmAsync(matchKeys, ct); }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[{Module}] Pre-warm FAILED", p.ModuleName);
@@ -208,55 +208,51 @@ public class SyncOrchestrator
             }
         });
 
-        await Task.WhenAll(new[] { truncateTask }.Concat(preWarmTasks));
+        await Task.WhenAll(new Task[] { truncateTask }.Concat(preWarmTasks));
         _logger.LogInformation(
-            "EventName={EventName} Table={Table} ActiveProcessors={Count}",
-            "Phase3Complete", StagingEntityMapper.EntityLogicalName, activeProcessors.Count);
+            "EventName={EventName} Table={Table} ActiveProcessors={Count} TruncateRan={Ran}",
+            "Phase3Complete", StagingEntityMapper.EntityLogicalName,
+            activeProcessors.Count, stagingHasRows);
 
         // ═══════════════════════════════════════════════
-        // PHASE 4: Process batches — staging insert + module updates in parallel
+        // PHASE 4: Second SQL pass — streaming transform + insert + process
         // ───────────────────────────────────────────────
-        // Outer loop is sequential (one SQL-batch slice at a time) so memory stays bounded.
-        // Inside each iteration, BatchInsertAsync (staging) fans out concurrently with the
-        // N processors' ProcessBatchAsync calls. Repository-level parallelism inside each
-        // is capped by MaxParallelBatches.
+        // For each SqlBatchSize-row batch from SQL: transform → map to staging entities →
+        // BatchInsert (staging) in parallel with each active processor's ProcessBatchAsync.
+        // The batch is discarded at the end of the iteration so memory peak stays at one
+        // batch (~20 MB for 10K rows), not the full dataset.
         // ═══════════════════════════════════════════════
         var phase4Sw = Stopwatch.StartNew();
         _logger.LogInformation(
-            "EventName={EventName} Records={Records} ActiveProcessors={ModuleCount}",
-            "Phase4Started", allRecords.Count, activeProcessors.Count);
+            "EventName={EventName} ActiveProcessors={ModuleCount} SqlBatchSize={SqlBatchSize}",
+            "Phase4Started", activeProcessors.Count, _settings.SqlBatchSize);
 
         int stagingSucceeded = 0;
         int stagingFailed = 0;
         var stagingFailures = new List<FailedRecord>();
-
-        // Slice the in-memory list into SqlBatchSize chunks. Each chunk drives one
-        // staging-insert + processor fan-out cycle.
-        var batches = allRecords
-            .Select((r, i) => new { Record = r, Index = i })
-            .GroupBy(x => x.Index / _settings.SqlBatchSize)
-            .Select(g => g.Select(x => x.Record).ToList())
-            .ToList();
-
         int batchNum = 0;
-        foreach (var batch in batches)
+
+        await foreach (var sqlBatch in _sqlReader.StreamBatchesAsync(maxMthKey, _settings.SqlBatchSize, ct))
         {
             batchNum++;
             var batchSw = Stopwatch.StartNew();
-            _logger.LogInformation(
-                "EventName={EventName} Batch={Batch}/{Total} BatchRows={Rows}",
-                "Phase4BatchStarted", batchNum, batches.Count, batch.Count);
-            // Map batch to staging entities
-            var stagingEntities = StagingEntityMapper.MapBatch(batch);
+            result.TotalRowsRead += sqlBatch.Count;
 
-            // Run staging insert + all module processors in parallel
+            var transformed = CommonTransformation.TransformBatch(sqlBatch);
+            var stagingEntities = StagingEntityMapper.MapBatch(transformed);
+
+            _logger.LogInformation(
+                "EventName={EventName} Batch={Batch} BatchRows={Rows} TotalRead={TotalRead}",
+                "Phase4BatchStarted", batchNum, transformed.Count, result.TotalRowsRead);
+
+            // Run staging insert + all module processors in parallel for this batch.
             var stagingTask = _repository.BatchInsertAsync(stagingEntities, ct);
 
             var moduleTasks = activeProcessors.Select(async processor =>
             {
                 try
                 {
-                    return await processor.ProcessBatchAsync(batch, ct);
+                    return await processor.ProcessBatchAsync(transformed, ct);
                 }
                 catch (Exception ex)
                 {
@@ -269,18 +265,15 @@ public class SyncOrchestrator
                 }
             }).ToList();
 
-            // Wait for both staging and all modules
             var allTasks = new List<Task> { stagingTask };
             allTasks.AddRange(moduleTasks);
             await Task.WhenAll(allTasks);
 
-            // Collect staging results
             var stagingResult = await stagingTask;
             stagingSucceeded += stagingResult.Succeeded;
             stagingFailed += stagingResult.Failed;
             stagingFailures.AddRange(stagingResult.Failures);
 
-            // Collect module results
             foreach (var moduleTask in moduleTasks)
             {
                 var moduleResult = await moduleTask;
@@ -298,16 +291,15 @@ public class SyncOrchestrator
 
             batchSw.Stop();
             _logger.LogInformation(
-                "EventName={EventName} Batch={Batch}/{Total} StagingSucceeded={Ok} StagingFailed={Failed} BatchSec={BatchSec:F1} Phase4ElapsedSec={Phase4Elapsed:F1}",
-                "Phase4BatchComplete", batchNum, batches.Count,
-                stagingResult.Succeeded, stagingResult.Failed,
+                "EventName={EventName} Batch={Batch} StagingSucceeded={Ok} StagingFailed={Failed} BatchSec={BatchSec:F1} Phase4ElapsedSec={Phase4Elapsed:F1}",
+                "Phase4BatchComplete", batchNum, stagingResult.Succeeded, stagingResult.Failed,
                 batchSw.Elapsed.TotalSeconds, phase4Sw.Elapsed.TotalSeconds);
         }
 
         phase4Sw.Stop();
         _logger.LogInformation(
-            "EventName={EventName} StagingSucceeded={Ok} StagingFailed={Failed} Batches={Batches} ElapsedSec={Elapsed:F1}",
-            "Phase4Complete", stagingSucceeded, stagingFailed, batches.Count, phase4Sw.Elapsed.TotalSeconds);
+            "EventName={EventName} StagingSucceeded={Ok} StagingFailed={Failed} TotalBatches={Batches} ElapsedSec={Elapsed:F1}",
+            "Phase4Complete", stagingSucceeded, stagingFailed, batchNum, phase4Sw.Elapsed.TotalSeconds);
 
         result.StagingRowsInserted = stagingSucceeded;
         result.StagingRowsFailed = stagingFailed;

@@ -1,4 +1,5 @@
 using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
 using SqlToDataverseSync.Domain.Entities;
 using SqlToDataverseSync.Domain.Models;
 
@@ -8,6 +9,13 @@ namespace SqlToDataverseSync.Domain.Interfaces;
 public interface ISqlDataReader
 {
     Task<long> GetRowCountForMthKeyAsync(int mthKey, CancellationToken ct = default);
+
+    /// <summary>
+    /// Yields raw ACCT_NUM values one at a time for the given MTH_KEY. Used by the
+    /// streaming pipeline to build the pre-warm match-key set without loading full rows.
+    /// </summary>
+    IAsyncEnumerable<string> StreamAccountNumbersAsync(int mthKey, CancellationToken ct = default);
+
     IAsyncEnumerable<List<Dictionary<string, object?>>> StreamBatchesAsync(
         int mthKey, int batchSize, CancellationToken ct = default);
 }
@@ -21,9 +29,10 @@ public interface IDataverseRepository
     Task<(int Succeeded, int Failed, List<FailedRecord> Failures)> BatchUpdateAsync(
         List<Entity> entities, CancellationToken ct = default);
     Task<int> DeleteAllAsync(string entityName, CancellationToken ct = default);
+    Task<bool> IsTableEmptyAsync(string entityName, CancellationToken ct = default);
     Task<Dictionary<string, Entity>> QueryByKeysAsync(
         string entityName, string keyColumn, List<string> keyValues,
-        string[] columnsToRetrieve, string? additionalFilter = null,
+        string[] columnsToRetrieve, FilterExpression? additionalFilter = null,
         CancellationToken ct = default);
 }
 
@@ -32,7 +41,7 @@ public interface IModuleProcessor
 {
     string ModuleName { get; }
     int Order { get; }
-    Task<ModuleResult> PreWarmAsync(List<ConsumerCreditRecord> allRecords, CancellationToken ct = default);
+    Task<ModuleResult> PreWarmAsync(IReadOnlyCollection<string> matchKeys, CancellationToken ct = default);
     Task<ModuleResult> ProcessBatchAsync(List<ConsumerCreditRecord> batch, CancellationToken ct = default);
     Task FlushAsync(CancellationToken ct = default);
 }

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
 using SqlToDataverseSync.Configuration;
 using SqlToDataverseSync.Domain.Entities;
 using SqlToDataverseSync.Domain.Interfaces;
@@ -9,16 +10,17 @@ namespace SqlToDataverseSync.Application.Processors;
 
 /// <summary>
 /// Base class for all module processors.
-/// 
+///
 /// Provides:
 ///   - Pre-warm: query module table upfront → build lookup dictionary
 ///   - ProcessBatch: use lookup to find matches → build updates → batch send
 ///   - Type conversion helpers
-///   
+///
 /// Each module extends this and overrides:
 ///   - EntityLogicalName, MatchColumn, ModuleName, Order
 ///   - GetColumnsToRetrieve()     → which columns to pre-warm
-///   - ShouldUpdate()             → filter condition (e.g., LoanIdentifier is null)
+///   - GetPreWarmFilter()         → optional server-side filter (e.g., LoanIdentifier IS NULL)
+///   - ShouldUpdate()             → client-side guard (kept for safety)
 ///   - BuildUpdateEntity()        → what columns to set on the matched record
 ///   - GetMatchKey()              → extract the key from a ConsumerCreditRecord
 /// </summary>
@@ -62,36 +64,43 @@ public abstract class BaseModuleProcessor : IModuleProcessor
     /// <summary>Builds the update entity with the new column values.</summary>
     protected abstract Entity BuildUpdateEntity(Entity existingEntity, ConsumerCreditRecord record);
 
+    /// <summary>
+    /// Optional server-side filter applied during pre-warm in addition to the IN(key)
+    /// condition. Lets each module narrow the pre-warm result set so we don't bring
+    /// back rows that ShouldUpdate would later reject. Default null means no filter.
+    /// </summary>
+    protected virtual FilterExpression? GetPreWarmFilter() => null;
+
     // ═══════════════════════════════════════════════════
     // Pre-warm: query module table once upfront
+    // ───────────────────────────────────────────────────
+    // Takes a pre-built set of match keys (stripped account numbers) from the orchestrator
+    // rather than the full records list — keeps memory low under the streaming pipeline.
     // ═══════════════════════════════════════════════════
 
     public virtual async Task<ModuleResult> PreWarmAsync(
-        List<ConsumerCreditRecord> allRecords,
+        IReadOnlyCollection<string> matchKeys,
         CancellationToken ct = default)
     {
         var result = new ModuleResult { ModuleName = ModuleName };
 
-        // Extract all unique match keys from the in-memory data
-        var matchKeys = allRecords
-            .Select(GetMatchKey)
-            .Where(k => !string.IsNullOrEmpty(k))
-            .Distinct()
-            .ToList();
+        var keys = matchKeys.Where(k => !string.IsNullOrEmpty(k)).ToList();
 
-        Logger.LogInformation("[{Module}] Pre-warming: querying {Count} unique keys against {Table}",
-            ModuleName, matchKeys.Count, EntityLogicalName);
+        Logger.LogInformation(
+            "EventName={EventName} Module={Module} Table={Table} Keys={Count} HasFilter={HasFilter}",
+            "PreWarmStarted", ModuleName, EntityLogicalName, keys.Count, GetPreWarmFilter() != null);
 
-        // Query module table for matching records — server-side filter
         LookupDict = await Repository.QueryByKeysAsync(
             EntityLogicalName,
             MatchColumn,
-            matchKeys,
+            keys,
             GetColumnsToRetrieve(),
-            ct: ct);
+            GetPreWarmFilter(),
+            ct);
 
-        Logger.LogInformation("[{Module}] Pre-warm complete: {Matches}/{Total} keys found in module table",
-            ModuleName, LookupDict.Count, matchKeys.Count);
+        Logger.LogInformation(
+            "EventName={EventName} Module={Module} Table={Table} Matched={Matched} OfKeys={Keys}",
+            "PreWarmComplete", ModuleName, EntityLogicalName, LookupDict.Count, keys.Count);
 
         return result;
     }
@@ -127,6 +136,7 @@ public abstract class BaseModuleProcessor : IModuleProcessor
             if (!ShouldUpdate(existingEntity, record))
             {
                 // Match found but update condition not met — skip
+                // With a server-side GetPreWarmFilter, this branch should rarely fire.
                 result.RowsSkipped++;
                 continue;
             }

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
 using SqlToDataverseSync.Configuration;
 using SqlToDataverseSync.Domain.Entities;
 using SqlToDataverseSync.Domain.Interfaces;
@@ -58,11 +59,26 @@ public class ForeclosureProcessor : BaseModuleProcessor
         return record.AcctNum;
     }
 
+    // ── Server-side pre-warm filter ───────────────────────────
+    // Limits the pre-warm query to rows where ff_loanidentifier is null OR zero
+    // (the two states we treat as "missing"). Pairs with ShouldUpdate below as a
+    // belt-and-braces guard against eventual-consistency drift between the
+    // pre-warm read and the batch write.
+    protected override FilterExpression? GetPreWarmFilter()
+    {
+        var filter = new FilterExpression(LogicalOperator.Or);
+        filter.AddCondition(LoanIdentifierColumn, ConditionOperator.Null);
+        filter.AddCondition(LoanIdentifierColumn, ConditionOperator.Equal, 0);
+        return filter;
+    }
+
     // ── Should we update this Foreclosure record? ─────────────
     protected override bool ShouldUpdate(Entity existingEntity, ConsumerCreditRecord record)
     {
         // Condition: Account is not null (guaranteed by being in lookup dict)
-        //            AND LoanIdentifier is null in Foreclosure
+        //            AND LoanIdentifier is null/empty/zero in Foreclosure.
+        // The server-side GetPreWarmFilter already enforces this, so this check
+        // is a safety net only and will rarely fail.
         return IsNullOrEmpty(existingEntity, LoanIdentifierColumn);
     }
 

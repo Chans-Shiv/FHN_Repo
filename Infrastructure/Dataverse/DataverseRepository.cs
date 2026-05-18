@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Crm.Sdk.Messages;
 using Microsoft.Extensions.Logging;
 using Microsoft.PowerPlatform.Dataverse.Client;
@@ -98,6 +99,29 @@ public class DataverseRepository : IDataverseRepository
     // For ~142K rows this used to take >30 min because parallelism was capped at 5.
     // Bumping DeleteParallelism (default 15) and surfacing progress logs lets us
     // see exactly which batch is running and tune further if 429s start appearing.
+
+    /// <summary>
+    /// Returns true if the entity has zero rows. One cheap RetrieveMultiple with TopCount=1
+    /// and no columns — used to skip the expensive truncate phase when there's nothing to delete.
+    /// </summary>
+    public async Task<bool> IsTableEmptyAsync(string entityName, CancellationToken ct = default)
+    {
+        var client = await _factory.GetClientAsync(ct);
+        var query = new QueryExpression(entityName)
+        {
+            ColumnSet = new ColumnSet(false),
+            TopCount = 1
+        };
+
+        var response = await client.RetrieveMultipleAsync(query, ct);
+        var empty = response.Entities.Count == 0;
+
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} IsEmpty={IsEmpty}",
+            "IsTableEmptyCheck", entityName, empty);
+
+        return empty;
+    }
 
     public async Task<int> DeleteAllAsync(string entityName, CancellationToken ct = default)
     {
@@ -244,54 +268,82 @@ public class DataverseRepository : IDataverseRepository
 
     public async Task<Dictionary<string, Entity>> QueryByKeysAsync(
         string entityName, string keyColumn, List<string> keyValues,
-        string[] columnsToRetrieve, string? additionalFilter = null,
+        string[] columnsToRetrieve, FilterExpression? additionalFilter = null,
         CancellationToken ct = default)
     {
+        var result = new ConcurrentDictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
+        if (keyValues.Count == 0) return new Dictionary<string, Entity>(result, StringComparer.OrdinalIgnoreCase);
+
         var client = await _factory.GetClientAsync(ct);
-        var result = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
 
-        if (keyValues.Count == 0) return result;
-
-        // Batch keys in groups of 500 to avoid query limits
-        const int chunkSize = 500;
+        // Chunk size 1000 — Dataverse In operator accepts up to 1000 values per condition.
+        // 142K keys ÷ 1000 = 142 chunks; with PreWarmParallelism=10 that's ~14 sequential
+        // waves instead of 142 — typically <30 s wall-clock instead of ~5 min.
+        const int chunkSize = 1000;
+        var chunks = new List<List<string>>();
         for (int i = 0; i < keyValues.Count; i += chunkSize)
+            chunks.Add(keyValues.Skip(i).Take(chunkSize).ToList());
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} TotalKeys={Keys} Chunks={Chunks} Parallelism={Parallelism} HasFilter={HasFilter}",
+            "PreWarmQueryStarted", entityName, keyValues.Count, chunks.Count,
+            _settings.PreWarmParallelism, additionalFilter != null);
+
+        int chunksCompleted = 0;
+        using var semaphore = new SemaphoreSlim(_settings.PreWarmParallelism);
+
+        var tasks = chunks.Select(async (chunk, idx) =>
         {
-            var chunk = keyValues.Skip(i).Take(chunkSize).ToList();
-
-            var query = new QueryExpression(entityName)
+            await semaphore.WaitAsync(ct);
+            var chunkSw = System.Diagnostics.Stopwatch.StartNew();
+            int chunkMatches = 0;
+            try
             {
-                ColumnSet = new ColumnSet(columnsToRetrieve),
-                Criteria = new FilterExpression(LogicalOperator.And)
-            };
-
-            // Single IN condition — cheaper than 500 OR-Equal conditions.
-            query.Criteria.AddCondition(
-                keyColumn, ConditionOperator.In, chunk.Cast<object>().ToArray());
-
-            query.PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 };
-
-            EntityCollection response;
-            do
-            {
-                response = await client.RetrieveMultipleAsync(query, ct);
-
-                foreach (var entity in response.Entities)
+                var query = new QueryExpression(entityName)
                 {
-                    // Type-safe extraction: GetAttributeValue<string> throws if column isn't a string.
-                    var key = entity.Contains(keyColumn)
-                        ? entity[keyColumn]?.ToString()
-                        : null;
+                    ColumnSet = new ColumnSet(columnsToRetrieve),
+                    Criteria = new FilterExpression(LogicalOperator.And),
+                    PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
+                };
 
-                    if (!string.IsNullOrEmpty(key) && !result.ContainsKey(key))
-                        result[key] = entity;
-                }
+                // AND: keyColumn IN (chunk) AND (additional server-side filter, if any).
+                query.Criteria.AddCondition(
+                    keyColumn, ConditionOperator.In, chunk.Cast<object>().ToArray());
+                if (additionalFilter != null)
+                    query.Criteria.AddFilter(additionalFilter);
 
-                query.PageInfo.PageNumber++;
-                query.PageInfo.PagingCookie = response.PagingCookie;
-            } while (response.MoreRecords);
-        }
+                EntityCollection response;
+                do
+                {
+                    response = await client.RetrieveMultipleAsync(query, ct);
+                    foreach (var entity in response.Entities)
+                    {
+                        var key = entity.Contains(keyColumn) ? entity[keyColumn]?.ToString() : null;
+                        if (!string.IsNullOrEmpty(key) && result.TryAdd(key, entity))
+                            chunkMatches++;
+                    }
+                    query.PageInfo.PageNumber++;
+                    query.PageInfo.PagingCookie = response.PagingCookie;
+                } while (response.MoreRecords);
 
-        return result;
+                var newCompleted = Interlocked.Increment(ref chunksCompleted);
+                _logger.LogInformation(
+                    "EventName={EventName} Table={Table} Chunk={Chunk}/{Total} ChunkKeys={ChunkKeys} ChunkMatches={Matches} ChunkMs={ChunkMs} ElapsedSec={Elapsed:F1}",
+                    "PreWarmChunk", entityName, newCompleted, chunks.Count,
+                    chunk.Count, chunkMatches, chunkSw.ElapsedMilliseconds, sw.Elapsed.TotalSeconds);
+            }
+            finally { semaphore.Release(); }
+        });
+
+        await Task.WhenAll(tasks);
+
+        sw.Stop();
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} Matched={Matched} OfKeys={Keys} ElapsedSec={Elapsed:F1}",
+            "PreWarmQueryComplete", entityName, result.Count, keyValues.Count, sw.Elapsed.TotalSeconds);
+
+        return new Dictionary<string, Entity>(result, StringComparer.OrdinalIgnoreCase);
     }
 
     // ═══════════════════════════════════════════════════

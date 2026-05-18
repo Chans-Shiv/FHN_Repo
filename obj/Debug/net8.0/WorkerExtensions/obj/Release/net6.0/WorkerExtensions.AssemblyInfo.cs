@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Microsoft.Azure.Functions.Worker.Extensions")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3908cf19b439fc9f17963241f0daf298819db7e3")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3d41d466745ffebb3e5cb8fb42aec70907cbd2ce")]
 [assembly: System.Reflection.AssemblyProductAttribute("Microsoft.Azure.Functions.Worker.Extensions")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Microsoft.Azure.Functions.Worker.Extensions")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

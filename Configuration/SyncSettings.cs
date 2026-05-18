@@ -21,6 +21,13 @@ public class SyncSettings
     /// </summary>
     public int DeleteParallelism { get; set; } = 15;
 
+    /// <summary>
+    /// Concurrent QueryByKeysAsync chunk requests during module pre-warm.
+    /// Pre-warm chunks the key set (1000 keys per IN-clause) and queries each chunk;
+    /// running them sequentially was the main source of "stuck at Phase 3" stalls.
+    /// </summary>
+    public int PreWarmParallelism { get; set; } = 10;
+
     /// <summary>Maximum consecutive days of same-hash failures before dead-lettering.</summary>
     public int MaxConsecutiveFailureDays { get; set; } = 3;
 

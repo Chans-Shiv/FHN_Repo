@@ -10,6 +10,7 @@
     "DataverseBatchSize": "1000",
     "MaxParallelBatches": "5",
     "DeleteParallelism": "15",
+    "PreWarmParallelism": "10",
     "TrackingStorageAccountUrl": "https://YOUR_STORAGE.blob.core.windows.net",
     "TrackingContainerName": "sync-state",
     "TrackingBlobName": "tracking.json"
