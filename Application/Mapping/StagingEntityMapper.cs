@@ -21,7 +21,7 @@ public static class StagingEntityMapper
         entity["crbee_accountkey"] = record.AcctKey;
         entity["crbee_accountnumber"] = record.AcctNum;
         entity["crbee_decimalaccountnumber"] = record.AcctNumDecimal;
-        entity["crbee_paddedaccountnum"] = record.AcctNumPadded;
+        entity["crbee_paddedaccountnumber"] = record.AcctNumPadded;
         entity["crbee_monthkey"] = record.MthKey;
         entity["crbee_accountbalance"] = new Money(record.Balance);
         // OptionSet attributes only written when source had a real value.

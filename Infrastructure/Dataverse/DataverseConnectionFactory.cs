@@ -105,7 +105,7 @@ public class DataverseConnectionFactory : IDisposable
                 "DataverseTokenRefresh", _cachedToken.HasValue ? "ExpiringSoon" : "Initial");
 
             _cachedToken = await _credential!.GetTokenAsync(
-                new TokenRequestContext(new[] { _scope! }));
+                new TokenRequestContext(new[] { _scope! }), default);
 
             _logger.LogInformation(
                 "EventName={EventName} ExpiresOn={ExpiresOn:o}",
