@@ -33,7 +33,10 @@ public class DataverseConnectionFactory : IDisposable
         {
             if (_client?.IsReady == true) return Task.FromResult(_client);
 
-            var credential = new DefaultAzureCredential(new DefaultAzureCredentialOptions());
+            var credential = new DefaultAzureCredential(new DefaultAzureCredentialOptions
+            {
+                ExcludeManagedIdentityCredential = true
+            });
             var scope = _settings.DataverseUrl.TrimEnd('/') + "/.default";
 
             _logger.LogInformation("Creating Dataverse ServiceClient via DefaultAzureCredential...");
