@@ -43,7 +43,7 @@ public class DataverseConnectionFactory : IDisposable
                 tokenProviderFunction: async (instanceUri) =>
                 {
                     var token = await credential.GetTokenAsync(
-                        new TokenRequestContext(new[] { scope }));
+                        new TokenRequestContext(new[] { scope }),default);
                     return token.Token;
                 },
                 useUniqueInstance: true);

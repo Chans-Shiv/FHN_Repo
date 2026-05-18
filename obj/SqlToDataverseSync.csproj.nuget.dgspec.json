@@ -48,6 +48,10 @@
               "target": "Package",
               "version": "[1.12.0, )"
             },
+            "Azure.Storage.Blobs": {
+              "target": "Package",
+              "version": "[12.22.0, )"
+            },
             "Microsoft.Azure.Functions.Worker": {
               "target": "Package",
               "version": "[1.22.0, )"
