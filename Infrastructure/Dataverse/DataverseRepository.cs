@@ -91,18 +91,15 @@ public class DataverseRepository : IDataverseRepository
     // DELETE ALL (full staging truncate, no filter)
     // ═══════════════════════════════════════════════════
     //
-    // Two phases, both heavily logged so the operator can watch progress:
-    //   Phase A — retrieve every record ID in the table, paged at 5000.
-    //   Phase B — issue ExecuteMultipleRequest deletes in chunks of DataverseBatchSize,
-    //             with DeleteParallelism concurrent batches. Polly retries 429/503.
-    //
-    // For ~142K rows this used to take >30 min because parallelism was capped at 5.
-    // Bumping DeleteParallelism (default 15) and surfacing progress logs lets us
-    // see exactly which batch is running and tune further if 429s start appearing.
+    // Uses BulkDeleteRequest — an async system job. The server enumerates the
+    // target rows and deletes them on background workers, so the work does NOT
+    // accumulate against Dataverse's 1,200,000 ms / 5-min combined-execution-time
+    // service-protection limit. Replaced an ExecuteMultiple-of-DeleteRequest path
+    // that tripped that limit on ~142K rows.
 
     /// <summary>
     /// Returns true if the entity has zero rows. One cheap RetrieveMultiple with TopCount=1
-    /// and no columns — used to skip the expensive truncate phase when there's nothing to delete.
+    /// and no columns — used to skip the truncate path when there's nothing to delete.
     /// </summary>
     public async Task<bool> IsTableEmptyAsync(string entityName, CancellationToken ct = default)
     {
@@ -129,137 +126,121 @@ public class DataverseRepository : IDataverseRepository
         var overallSw = System.Diagnostics.Stopwatch.StartNew();
 
         _logger.LogInformation(
-            "EventName={EventName} Table={Table} Parallelism={Parallelism} BatchSize={BatchSize}",
-            "TruncateStarted", entityName, _settings.DeleteParallelism, _settings.DataverseBatchSize);
+            "EventName={EventName} Table={Table} PollIntervalSec={Interval} TimeoutMin={Timeout}",
+            "TruncateStarted", entityName,
+            _settings.BulkDeletePollIntervalSeconds, _settings.BulkDeleteTimeoutMinutes);
 
-        // ── Phase A: page through the table and collect IDs ──
-        var allIds = await RetrieveAllIdsAsync(client, entityName, ct);
-
-        if (allIds.Count == 0)
+        var bulkDeleteRequest = new BulkDeleteRequest
         {
-            _logger.LogInformation(
-                "EventName={EventName} Table={Table} Reason=AlreadyEmpty",
-                "TruncateComplete", entityName);
-            return 0;
-        }
+            JobName = $"Truncate-{entityName}-{DateTime.UtcNow:yyyyMMddHHmmss}",
+            QuerySet = new[]
+            {
+                new QueryExpression(entityName) { ColumnSet = new ColumnSet(false) }
+            },
+            StartDateTime = DateTime.UtcNow,
+            SendEmailNotification = false,
+            ToRecipients = Array.Empty<Guid>(),
+            CCRecipients = Array.Empty<Guid>(),
+            RecurrencePattern = string.Empty
+        };
 
-        // ── Phase B: parallel batched deletes ──
-        var totalDeleted = await DeleteIdsInBatchesAsync(client, entityName, allIds, ct);
+        BulkDeleteResponse submitResponse = null!;
+        await _retryPipeline.ExecuteAsync(async token =>
+        {
+            submitResponse = (BulkDeleteResponse)await client.ExecuteAsync(bulkDeleteRequest, token);
+        }, ct);
+
+        var jobId = submitResponse.JobId;
+        _logger.LogInformation(
+            "EventName={EventName} Table={Table} JobId={JobId}",
+            "TruncateJobSubmitted", entityName, jobId);
+
+        var deletedCount = await WaitForBulkDeleteAsync(client, entityName, jobId, ct);
 
         overallSw.Stop();
         _logger.LogInformation(
-            "EventName={EventName} Table={Table} Deleted={Deleted}/{Total} ElapsedSec={Elapsed:F1} Rate={Rate:F0}/s",
-            "TruncateComplete", entityName, totalDeleted, allIds.Count,
+            "EventName={EventName} Table={Table} Deleted={Deleted} ElapsedSec={Elapsed:F1} Rate={Rate:F0}/s",
+            "TruncateComplete", entityName, deletedCount,
             overallSw.Elapsed.TotalSeconds,
-            totalDeleted / Math.Max(overallSw.Elapsed.TotalSeconds, 0.001));
+            deletedCount / Math.Max(overallSw.Elapsed.TotalSeconds, 0.001));
 
-        return totalDeleted;
+        return deletedCount;
     }
 
-    /// <summary>
-    /// Phase A of truncate — paged ID retrieval. Dataverse pages are sequential
-    /// (PagingCookie chain), so this can't be parallelised. We log per page so
-    /// the operator sees progress instead of a black hole.
-    /// </summary>
-    private async Task<List<Guid>> RetrieveAllIdsAsync(
-        ServiceClient client, string entityName, CancellationToken ct)
+    private async Task<int> WaitForBulkDeleteAsync(
+        ServiceClient client, string entityName, Guid jobId, CancellationToken ct)
     {
+        var pollInterval = TimeSpan.FromSeconds(_settings.BulkDeletePollIntervalSeconds);
+        var timeout = TimeSpan.FromMinutes(_settings.BulkDeleteTimeoutMinutes);
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var query = new QueryExpression(entityName)
+        int lastLoggedStatus = -1;
+
+        while (true)
         {
-            ColumnSet = new ColumnSet(false), // We only need Id — fastest projection
-            PageInfo = new PagingInfo { Count = 5000, PageNumber = 1 }
-        };
+            if (sw.Elapsed >= timeout)
+                throw new TimeoutException(
+                    $"BulkDelete job {jobId} for {entityName} did not complete within {timeout.TotalMinutes:F0} min");
 
-        var allIds = new List<Guid>();
-        EntityCollection response;
-        do
-        {
-            response = await client.RetrieveMultipleAsync(query, ct);
-            allIds.AddRange(response.Entities.Select(e => e.Id));
+            await Task.Delay(pollInterval, ct);
 
-            _logger.LogInformation(
-                "EventName={EventName} Table={Table} Page={Page} PageRows={PageRows} Cumulative={Cumulative} ElapsedSec={Elapsed:F1}",
-                "TruncateRetrievePage", entityName, query.PageInfo.PageNumber,
-                response.Entities.Count, allIds.Count, sw.Elapsed.TotalSeconds);
-
-            query.PageInfo.PageNumber++;
-            query.PageInfo.PagingCookie = response.PagingCookie;
-        } while (response.MoreRecords);
-
-        sw.Stop();
-        _logger.LogInformation(
-            "EventName={EventName} Table={Table} TotalIds={Total} Pages={Pages} ElapsedSec={Elapsed:F1}",
-            "TruncateRetrieveComplete", entityName, allIds.Count, query.PageInfo.PageNumber - 1,
-            sw.Elapsed.TotalSeconds);
-
-        return allIds;
-    }
-
-    /// <summary>
-    /// Phase B of truncate — parallel ExecuteMultipleRequest deletes.
-    /// Throttled by DeleteParallelism (not MaxParallelBatches) so the truncate
-    /// can be tuned independently of the per-processor write parallelism.
-    /// </summary>
-    private async Task<int> DeleteIdsInBatchesAsync(
-        ServiceClient client, string entityName, List<Guid> ids, CancellationToken ct)
-    {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        int totalDeleted = 0;
-        int batchesCompleted = 0;
-
-        // Slice the IDs into ExecuteMultiple-sized chunks.
-        var chunks = ids
-            .Select((id, i) => new { id, i })
-            .GroupBy(x => x.i / _settings.DataverseBatchSize)
-            .Select(g => g.Select(x => x.id).ToList())
-            .ToList();
-
-        _logger.LogInformation(
-            "EventName={EventName} Table={Table} TotalBatches={Batches} Parallelism={Parallelism}",
-            "TruncateDeleteStarted", entityName, chunks.Count, _settings.DeleteParallelism);
-
-        using var semaphore = new SemaphoreSlim(_settings.DeleteParallelism);
-        var tasks = chunks.Select(async (chunk, idx) =>
-        {
-            await semaphore.WaitAsync(ct);
-            var batchSw = System.Diagnostics.Stopwatch.StartNew();
-            try
+            Entity job = null!;
+            await _retryPipeline.ExecuteAsync(async token =>
             {
-                // One ExecuteMultipleRequest carrying up to DataverseBatchSize DeleteRequests.
-                // Counts as a single throttled call against Dataverse's 6000 req / 5 min limit.
-                var request = new ExecuteMultipleRequest
-                {
-                    Settings = new ExecuteMultipleSettings { ContinueOnError = true, ReturnResponses = false },
-                    Requests = new OrganizationRequestCollection()
-                };
-                foreach (var id in chunk)
-                    request.Requests.Add(new DeleteRequest { Target = new EntityReference(entityName, id) });
+                job = await client.RetrieveAsync(
+                    "asyncoperation", jobId,
+                    new ColumnSet("statecode", "statuscode", "friendlymessage", "message"), token);
+            }, ct);
 
-                await _retryPipeline.ExecuteAsync(async token =>
-                {
-                    await client.ExecuteAsync(request, token);
-                }, ct);
+            var stateCode  = ((OptionSetValue)job["statecode"]).Value;
+            var statusCode = ((OptionSetValue)job["statuscode"]).Value;
 
-                var newTotal = Interlocked.Add(ref totalDeleted, chunk.Count);
-                var newCompleted = Interlocked.Increment(ref batchesCompleted);
-
+            if (statusCode != lastLoggedStatus)
+            {
                 _logger.LogInformation(
-                    "EventName={EventName} Table={Table} Batch={Batch}/{Total} BatchRows={BatchRows} Cumulative={Cumulative} BatchMs={BatchMs} ElapsedSec={Elapsed:F1}",
-                    "TruncateDeleteBatch", entityName, newCompleted, chunks.Count,
-                    chunk.Count, newTotal, batchSw.ElapsedMilliseconds, sw.Elapsed.TotalSeconds);
+                    "EventName={EventName} Table={Table} JobId={JobId} State={State} Status={Status} ElapsedSec={Elapsed:F1}",
+                    "TruncateJobPoll", entityName, jobId, stateCode, statusCode, sw.Elapsed.TotalSeconds);
+                lastLoggedStatus = statusCode;
             }
-            finally { semaphore.Release(); }
-        });
 
-        await Task.WhenAll(tasks);
+            // statecode 3 = Completed (terminal). Anything else means still running.
+            if (stateCode != 3) continue;
 
-        sw.Stop();
-        _logger.LogInformation(
-            "EventName={EventName} Table={Table} Deleted={Deleted} BatchesRun={Batches} ElapsedSec={Elapsed:F1}",
-            "TruncateDeleteComplete", entityName, totalDeleted, chunks.Count, sw.Elapsed.TotalSeconds);
+            // statuscode 30 = Succeeded. Any other terminal status is a failure.
+            if (statusCode == 30)
+                return await GetBulkDeleteSuccessCountAsync(client, jobId, ct);
 
-        return totalDeleted;
+            var message = job.Contains("message") ? job["message"]?.ToString() : null;
+            var friendly = job.Contains("friendlymessage") ? job["friendlymessage"]?.ToString() : null;
+            throw new InvalidOperationException(
+                $"BulkDelete job {jobId} for {entityName} terminated with Status={statusCode}. " +
+                $"FriendlyMessage='{friendly}' Message='{message}'");
+        }
+    }
+
+    private async Task<int> GetBulkDeleteSuccessCountAsync(
+        ServiceClient client, Guid jobId, CancellationToken ct)
+    {
+        var query = new QueryExpression("bulkdeleteoperation")
+        {
+            ColumnSet = new ColumnSet("successcount", "failurecount")
+        };
+        query.Criteria.AddCondition("asyncoperationid", ConditionOperator.Equal, jobId);
+
+        var result = await client.RetrieveMultipleAsync(query, ct);
+        if (result.Entities.Count == 0) return 0;
+
+        var op = result.Entities[0];
+        var success = op.Contains("successcount") ? (int)op["successcount"] : 0;
+        var failure = op.Contains("failurecount") ? (int)op["failurecount"] : 0;
+
+        if (failure > 0)
+        {
+            _logger.LogWarning(
+                "EventName={EventName} JobId={JobId} Success={Success} Failure={Failure}",
+                "TruncateJobPartialFailure", jobId, success, failure);
+        }
+
+        return success;
     }
 
     // ═══════════════════════════════════════════════════
