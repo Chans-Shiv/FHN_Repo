@@ -41,10 +41,12 @@ var host = new HostBuilder()
 
         // ── Module Processors (add new modules here) ──
         services.AddTransient<IModuleProcessor, ForeclosureProcessor>();
-        // services.AddTransient<IModuleProcessor, BankruptcyProcessor>();
-        // services.AddTransient<IModuleProcessor, LossMitProcessor>();
-        // services.AddTransient<IModuleProcessor, SpecialityProgramsProcessor>();
+        services.AddTransient<IModuleProcessor, BankruptcyProcessor>();
+        services.AddTransient<IModuleProcessor, LossMitProcessor>();
+        services.AddTransient<IModuleProcessor, SpecialityProgramsProcessor>();
         // services.AddTransient<IModuleProcessor, UnblocksProcessor>();
+        //   ↑ Unblocks is parked until the LoanIdentifier column logical name on
+        //   dmt_tblmain is confirmed. See UnblocksProcessor.cs for the TODO.
 
         // ── Application Services ──
         services.AddTransient<SyncOrchestrator>();
