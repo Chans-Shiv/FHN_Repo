@@ -1,9 +1,9 @@
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
-using SqlToDataverseSync.Domain.Entities;
-using SqlToDataverseSync.Domain.Models;
+using Fhn.Cdm.DataverseSync.Domain.Entities;
+using Fhn.Cdm.DataverseSync.Domain.Models;
 
-namespace SqlToDataverseSync.Domain.Interfaces;
+namespace Fhn.Cdm.DataverseSync.Domain.Interfaces;
 
 /// <summary>Streams rows from SQL MI in batches. Never loads full result set.</summary>
 public interface ISqlDataReader

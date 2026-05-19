@@ -1,7 +1,7 @@
 using Microsoft.Xrm.Sdk;
-using SqlToDataverseSync.Domain.Entities;
+using Fhn.Cdm.DataverseSync.Domain.Entities;
 
-namespace SqlToDataverseSync.Application.Mapping;
+namespace Fhn.Cdm.DataverseSync.Application.Mapping;
 
 /// <summary>
 /// Maps ConsumerCreditRecord → Dataverse Entity for staging table.

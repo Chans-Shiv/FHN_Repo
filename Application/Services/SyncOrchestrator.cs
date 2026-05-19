@@ -2,14 +2,14 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
-using SqlToDataverseSync.Application;
-using SqlToDataverseSync.Application.Mapping;
-using SqlToDataverseSync.Application.Transformations;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Interfaces;
-using SqlToDataverseSync.Domain.Models;
+using Fhn.Cdm.DataverseSync.Application;
+using Fhn.Cdm.DataverseSync.Application.Mapping;
+using Fhn.Cdm.DataverseSync.Application.Transformations;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Domain.Models;
 
-namespace SqlToDataverseSync.Application.Services;
+namespace Fhn.Cdm.DataverseSync.Application.Services;
 
 /// <summary>
 /// Orchestrates the complete sync pipeline:

@@ -1,8 +1,8 @@
 using Microsoft.Extensions.Logging;
-using SqlToDataverseSync.Domain.Interfaces;
-using SqlToDataverseSync.Domain.Models;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Domain.Models;
 
-namespace SqlToDataverseSync.Infrastructure.DeadLetter;
+namespace Fhn.Cdm.DataverseSync.Infrastructure.DeadLetter;
 
 /// <summary>
 /// Emits dead-letter records as structured log events. On Azure Functions these flow

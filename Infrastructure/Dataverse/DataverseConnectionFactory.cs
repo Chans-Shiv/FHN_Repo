@@ -2,9 +2,9 @@ using Azure.Core;
 using Azure.Identity;
 using Microsoft.Extensions.Logging;
 using Microsoft.PowerPlatform.Dataverse.Client;
-using SqlToDataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Configuration;
 
-namespace SqlToDataverseSync.Infrastructure.Dataverse;
+namespace Fhn.Cdm.DataverseSync.Infrastructure.Dataverse;
 
 /// <summary>
 /// Creates and manages the Dataverse ServiceClient connection.

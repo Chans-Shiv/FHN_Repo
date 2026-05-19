@@ -1,4 +1,4 @@
-namespace SqlToDataverseSync.Configuration;
+namespace Fhn.Cdm.DataverseSync.Configuration;
 
 public class SyncSettings
 {

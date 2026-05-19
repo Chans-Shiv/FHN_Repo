@@ -5,11 +5,11 @@ using Azure.Identity;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Logging;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Interfaces;
-using SqlToDataverseSync.Domain.Models;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Domain.Models;
 
-namespace SqlToDataverseSync.Infrastructure.Tracking;
+namespace Fhn.Cdm.DataverseSync.Infrastructure.Tracking;
 
 /// <summary>
 /// Persists sync tracking state as a single JSON blob in Azure Storage.

@@ -1,4 +1,4 @@
-namespace SqlToDataverseSync.Domain.Entities;
+namespace Fhn.Cdm.DataverseSync.Domain.Entities;
 
 /// <summary>
 /// Strongly-typed representation of a row from dbo_ConsumerCreditDataAcq

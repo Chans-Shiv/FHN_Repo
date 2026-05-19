@@ -2,10 +2,10 @@ using System.Data;
 using System.Runtime.CompilerServices;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 
-namespace SqlToDataverseSync.Infrastructure.SqlMi;
+namespace Fhn.Cdm.DataverseSync.Infrastructure.SqlMi;
 
 public class SqlMiDataReader : ISqlDataReader
 {

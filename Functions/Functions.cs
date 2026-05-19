@@ -1,27 +1,27 @@
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
-using SqlToDataverseSync.Application.Services;
+using Fhn.Cdm.DataverseSync.Application.Services;
 
-namespace SqlToDataverseSync.Functions;
+namespace Fhn.Cdm.DataverseSync.Functions;
 
-public class ScheduledSyncFunction
+public class CdmDataverseSyncFunction
 {
     private readonly SyncOrchestrator _orchestrator;
-    private readonly ILogger<ScheduledSyncFunction> _logger;
+    private readonly ILogger<CdmDataverseSyncFunction> _logger;
 
-    public ScheduledSyncFunction(SyncOrchestrator orchestrator, ILogger<ScheduledSyncFunction> logger)
+    public CdmDataverseSyncFunction(SyncOrchestrator orchestrator, ILogger<CdmDataverseSyncFunction> logger)
     {
         _orchestrator = orchestrator;
         _logger = logger;
     }
 
-    [Function("ScheduledSync")]
+    [Function("CdmDataverseSync")]
     public async Task Run(
         [TimerTrigger("%SyncScheduleCron%")] TimerInfo timerInfo,
         CancellationToken ct)
     {
-        _logger.LogInformation("Scheduled sync triggered at {Time}", DateTime.UtcNow);
+        _logger.LogInformation("CdmDataverseSync triggered at {Time}", DateTime.UtcNow);
         var result = await _orchestrator.ExecuteSyncAsync(ct);
-        _logger.LogInformation("Scheduled sync finished. {Summary}", result.Summary);
+        _logger.LogInformation("CdmDataverseSync finished. {Summary}", result.Summary);
     }
 }

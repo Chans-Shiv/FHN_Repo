@@ -7,11 +7,11 @@ using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Query;
 using Polly;
 using Polly.Retry;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Interfaces;
-using SqlToDataverseSync.Domain.Models;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Domain.Models;
 
-namespace SqlToDataverseSync.Infrastructure.Dataverse;
+namespace Fhn.Cdm.DataverseSync.Infrastructure.Dataverse;
 
 /// <summary>
 /// Dataverse CRUD operations with:

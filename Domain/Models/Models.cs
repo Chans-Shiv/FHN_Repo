@@ -1,6 +1,6 @@
 using Microsoft.Xrm.Sdk;
 
-namespace SqlToDataverseSync.Domain.Models;
+namespace Fhn.Cdm.DataverseSync.Domain.Models;
 
 public class SyncResult
 {

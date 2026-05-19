@@ -2,14 +2,14 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using SqlToDataverseSync.Application.Processors;
-using SqlToDataverseSync.Application.Services;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Interfaces;
-using SqlToDataverseSync.Infrastructure.Dataverse;
-using SqlToDataverseSync.Infrastructure.DeadLetter;
-using SqlToDataverseSync.Infrastructure.SqlMi;
-using SqlToDataverseSync.Infrastructure.Tracking;
+using Fhn.Cdm.DataverseSync.Application.Processors;
+using Fhn.Cdm.DataverseSync.Application.Services;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Infrastructure.Dataverse;
+using Fhn.Cdm.DataverseSync.Infrastructure.DeadLetter;
+using Fhn.Cdm.DataverseSync.Infrastructure.SqlMi;
+using Fhn.Cdm.DataverseSync.Infrastructure.Tracking;
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()

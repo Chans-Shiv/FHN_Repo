@@ -1,11 +1,11 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Entities;
-using SqlToDataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Domain.Entities;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 
-namespace SqlToDataverseSync.Application.Processors;
+namespace Fhn.Cdm.DataverseSync.Application.Processors;
 
 /// <summary>
 /// Foreclosure module processor.

@@ -1,4 +1,4 @@
-namespace SqlToDataverseSync.Application;
+namespace Fhn.Cdm.DataverseSync.Application;
 
 /// <summary>
 /// Computes MTH_KEY values used as the SQL filter and the staging-row month tag.
