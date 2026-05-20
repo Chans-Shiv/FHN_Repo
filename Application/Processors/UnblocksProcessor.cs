@@ -12,15 +12,8 @@ namespace Fhn.Cdm.DataverseSync.Application.Processors;
 ///
 /// Table:     dmt_tblmain
 /// Match:     ConsumerCreditRecord.AcctNum → dmt_accountnumber
-/// Condition: LoanIdentifier column is null OR zero  (column logical name pending)
-/// Action:    UPDATE LoanIdentifier = record.LoanIdentifier
-///
-/// ── STATUS: NOT YET ACTIVE ────────────────────────────────────────────────
-/// The Dataverse logical name of the LoanIdentifier column on dmt_tblmain has
-/// not been confirmed yet. Once known:
-///   1. Replace TODO_LoanIdentifierColumn below with the real value.
-///   2. Uncomment the AddTransient line in Program.cs.
-/// Until then this processor is NOT registered in DI and will not run.
+/// Condition: dmt_loanidentifier is null OR zero
+/// Action:    UPDATE dmt_loanidentifier = record.LoanIdentifier
 /// </summary>
 public class UnblocksProcessor : BaseModuleProcessor
 {
@@ -30,8 +23,7 @@ public class UnblocksProcessor : BaseModuleProcessor
     protected override string EntityLogicalName => "dmt_tblmain";
     protected override string MatchColumn => "dmt_accountnumber";
 
-    // TODO: replace placeholder once the column's logical name is confirmed.
-    private const string LoanIdentifierColumn = "TODO_LoanIdentifierColumn";
+    private const string LoanIdentifierColumn = "dmt_loanidentifier";
 
     public UnblocksProcessor(
         IDataverseRepository repository,

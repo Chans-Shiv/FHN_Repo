@@ -46,9 +46,7 @@ var host = new HostBuilder()
         services.AddTransient<IModuleProcessor, BankruptcyProcessor>();
         services.AddTransient<IModuleProcessor, LossMitProcessor>();
         services.AddTransient<IModuleProcessor, SpecialityProgramsProcessor>();
-        // services.AddTransient<IModuleProcessor, UnblocksProcessor>();
-        //   ↑ Unblocks is parked until the LoanIdentifier column logical name on
-        //   dmt_tblmain is confirmed. See UnblocksProcessor.cs for the TODO.
+        services.AddTransient<IModuleProcessor, UnblocksProcessor>();
 
         // ── Application Services ──
         services.AddTransient<SyncOrchestrator>();
