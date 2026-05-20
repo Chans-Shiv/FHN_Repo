@@ -116,6 +116,12 @@ public abstract class BaseModuleProcessor : IModuleProcessor
         var result = new ModuleResult { ModuleName = ModuleName };
         var updateEntities = new List<Entity>();
 
+        // Track which source record produced each update entity so we can enrich
+        // any FailedRecord that comes back with the original AccountNumber + LoanIdentifier
+        // for the dead-letter writer. The update entity carries only Id + the column being
+        // updated, so without this map we'd lose that context at failure time.
+        var sourceByEntityId = new Dictionary<Guid, ConsumerCreditRecord>();
+
         foreach (var record in batch)
         {
             var matchKey = GetMatchKey(record);
@@ -144,6 +150,7 @@ public abstract class BaseModuleProcessor : IModuleProcessor
             // Build the update entity
             var updateEntity = BuildUpdateEntity(existingEntity, record);
             updateEntities.Add(updateEntity);
+            sourceByEntityId[updateEntity.Id] = record;
             result.RowsProcessed++;
         }
 
@@ -151,6 +158,19 @@ public abstract class BaseModuleProcessor : IModuleProcessor
         if (updateEntities.Count > 0)
         {
             var (updated, failed, failures) = await Repository.BatchUpdateAsync(updateEntities, ct);
+
+            // Enrich each failure with the source AcctNum + LoanIdentifier so the
+            // dead-letter writer can populate the error table without re-deriving.
+            foreach (var failure in failures)
+            {
+                if (failure.Entity != null
+                    && sourceByEntityId.TryGetValue(failure.Entity.Id, out var src))
+                {
+                    failure.AccountNumber = src.AcctNum;
+                    failure.LoanIdentifier = src.LoanIdentifier;
+                }
+            }
+
             result.RowsUpdated += updated;
             result.RowsFailed += failed;
             result.Failures.AddRange(failures);

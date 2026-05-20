@@ -295,6 +295,24 @@ public class SyncOrchestrator
             var stagingResult = await stagingTask;
             stagingSucceeded += stagingResult.Succeeded;
             stagingFailed += stagingResult.Failed;
+
+            // Enrich staging failures with AccountNumber + LoanIdentifier directly from
+            // the insert entity's attributes — StagingEntityMapper.MapBatch already set
+            // these on every entity. The dead-letter writer needs them as first-class
+            // fields, not buried inside Entity.Attributes.
+            foreach (var failure in stagingResult.Failures)
+            {
+                if (failure.Entity != null)
+                {
+                    failure.AccountNumber = failure.Entity.Contains("crbee_accountnumber")
+                        ? failure.Entity["crbee_accountnumber"]?.ToString()
+                        : null;
+                    failure.LoanIdentifier = failure.Entity.Contains("crbee_loanidentifier")
+                        ? failure.Entity["crbee_loanidentifier"] as int?
+                        : null;
+                }
+            }
+
             stagingFailures.AddRange(stagingResult.Failures);
 
             foreach (var moduleTask in moduleTasks)
@@ -327,15 +345,22 @@ public class SyncOrchestrator
         result.StagingRowsInserted = stagingSucceeded;
         result.StagingRowsFailed = stagingFailed;
 
+        // Correlation id for the error-table rows: Activity.Current.RootId carries the
+        // Functions invocation id (set by the worker host), giving us a join key with
+        // App Insights operation_Id. Fall back to a fresh GUID if no Activity exists
+        // (e.g., when run outside the Functions host during tests).
+        var invocationId = System.Diagnostics.Activity.Current?.RootId
+                           ?? Guid.NewGuid().ToString();
+
         // Dead-letter staging failures
         if (stagingFailures.Count > 0)
-            await _deadLetter.WriteAsync("Staging", stagingFailures, ct);
+            await _deadLetter.WriteAsync("Staging", maxMthKey, invocationId, stagingFailures, ct);
 
         // Dead-letter module failures
         foreach (var (moduleName, moduleResult) in result.ModuleResults)
         {
             if (moduleResult.Failures.Count > 0)
-                await _deadLetter.WriteAsync(moduleName, moduleResult.Failures, ct);
+                await _deadLetter.WriteAsync(moduleName, maxMthKey, invocationId, moduleResult.Failures, ct);
         }
 
         // ═══════════════════════════════════════════════

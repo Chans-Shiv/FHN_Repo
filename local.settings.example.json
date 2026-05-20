@@ -20,6 +20,11 @@
 
     "TrackingStorageAccountUrl": "https://YOUR_STORAGE.blob.core.windows.net",
     "TrackingContainerName": "sync-state",
-    "TrackingBlobName": "tracking.json"
+    "TrackingBlobName": "tracking.json",
+
+    "ErrorTableEntityName": "crbee_consumercredit_errortable",
+
+    "_comment_appinsights": "Optional. When unset the app runs fine and telemetry is discarded. Set it to start seeing traces/dependencies/exceptions in the Application Insights resource. Format: InstrumentationKey=<guid>;IngestionEndpoint=https://<region>.applicationinsights.azure.com/;...",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": ""
   }
 }

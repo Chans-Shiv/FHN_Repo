@@ -56,5 +56,14 @@ public interface ITrackingService
 /// <summary>Persists permanently failed records for manual review.</summary>
 public interface IDeadLetterService
 {
-    Task WriteAsync(string moduleName, List<FailedRecord> failures, CancellationToken ct = default);
+    /// <param name="moduleName">Module/Process that produced the failures (e.g. "Staging", "Foreclosure").</param>
+    /// <param name="mthKey">YYYYMM identifier of the data partition being processed.</param>
+    /// <param name="invocationId">Function invocation correlation id (Activity.Current.RootId).</param>
+    /// <param name="failures">Failed records, each pre-enriched with AccountNumber + LoanIdentifier by the caller.</param>
+    Task WriteAsync(
+        string moduleName,
+        int mthKey,
+        string invocationId,
+        List<FailedRecord> failures,
+        CancellationToken ct = default);
 }

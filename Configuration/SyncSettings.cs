@@ -44,4 +44,11 @@ public class SyncSettings
 
     /// <summary>Blob name for the serialized TrackingState.</summary>
     public string TrackingBlobName { get; set; } = "tracking.json";
+
+    /// <summary>
+    /// Logical name of the Dataverse error table that receives one row per failed
+    /// staging/module operation. If the insert into this table fails, the writer
+    /// falls back to App Insights structured logging.
+    /// </summary>
+    public string ErrorTableEntityName { get; set; } = "crbee_consumercredit_errortable";
 }

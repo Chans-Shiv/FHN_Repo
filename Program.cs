@@ -30,6 +30,7 @@ var host = new HostBuilder()
             TrackingStorageAccountUrl = GetRequired("TrackingStorageAccountUrl"),
             TrackingContainerName = Environment.GetEnvironmentVariable("TrackingContainerName") ?? "sync-state",
             TrackingBlobName = Environment.GetEnvironmentVariable("TrackingBlobName") ?? "tracking.json",
+            ErrorTableEntityName = Environment.GetEnvironmentVariable("ErrorTableEntityName") ?? "crbee_consumercredit_errortable",
         };
         services.AddSingleton(settings);
 
@@ -38,7 +39,7 @@ var host = new HostBuilder()
         services.AddTransient<ISqlDataReader, SqlMiDataReader>();
         services.AddTransient<IDataverseRepository, DataverseRepository>();
         services.AddTransient<ITrackingService, BlobTrackingService>();
-        services.AddTransient<IDeadLetterService, DeadLetterService>();
+        services.AddTransient<IDeadLetterService, DataverseErrorTableService>();
 
         // ── Module Processors (add new modules here) ──
         services.AddTransient<IModuleProcessor, ForeclosureProcessor>();
@@ -54,6 +55,26 @@ var host = new HostBuilder()
 
         // ── Logging ──
         services.AddLogging(b => b.SetMinimumLevel(LogLevel.Information));
+
+        // ── Application Insights ──
+        // No-ops cleanly when APPLICATIONINSIGHTS_CONNECTION_STRING isn't set;
+        // telemetry will start flowing the moment the env var is populated
+        // (no code change needed). Until then logs continue via the Functions
+        // host's console/file sinks as before.
+        services.AddApplicationInsightsTelemetryWorkerService();
+        services.ConfigureFunctionsApplicationInsights();
+
+        // The Functions worker installs a default LoggerFilterRule that caps
+        // the App Insights logger at LogLevel.Warning, which would silently
+        // drop our EventName=... Information events. Remove that rule so the
+        // structured log pipeline reaches App Insights fully.
+        services.Configure<LoggerFilterOptions>(options =>
+        {
+            var aiRule = options.Rules.FirstOrDefault(rule =>
+                rule.ProviderName == "Microsoft.Extensions.Logging.ApplicationInsights.ApplicationInsightsLoggerProvider");
+            if (aiRule is not null)
+                options.Rules.Remove(aiRule);
+        });
     })
     .Build();
 
