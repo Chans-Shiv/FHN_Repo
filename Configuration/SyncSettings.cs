@@ -15,18 +15,6 @@ public class SyncSettings
     public int MaxParallelBatches { get; set; } = 5;
 
     /// <summary>
-    /// Seconds between status polls of the BulkDelete async system job.
-    /// Lower = faster reaction when the job finishes; higher = fewer API calls.
-    /// </summary>
-    public int BulkDeletePollIntervalSeconds { get; set; } = 15;
-
-    /// <summary>
-    /// Maximum time to wait for the BulkDelete async job before throwing TimeoutException.
-    /// 30 min covers staging tables up to several million rows in practice.
-    /// </summary>
-    public int BulkDeleteTimeoutMinutes { get; set; } = 30;
-
-    /// <summary>
     /// Concurrent QueryByKeysAsync chunk requests during module pre-warm.
     /// Pre-warm chunks the key set (1000 keys per IN-clause) and queries each chunk;
     /// running them sequentially was the main source of "stuck at Phase 3" stalls.

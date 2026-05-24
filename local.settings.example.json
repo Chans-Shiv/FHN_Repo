@@ -13,8 +13,6 @@
     "SqlBatchSize": "10000",
     "DataverseBatchSize": "1000",
     "MaxParallelBatches": "5",
-    "BulkDeletePollIntervalSeconds": "15",
-    "BulkDeleteTimeoutMinutes": "30",
     "PreWarmParallelism": "10",
     "MaxConsecutiveFailureDays": "3",
 

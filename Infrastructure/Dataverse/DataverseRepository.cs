@@ -10,15 +10,17 @@ using Polly.Retry;
 using Fhn.Cdm.DataverseSync.Configuration;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 using Fhn.Cdm.DataverseSync.Domain.Models;
+// NOTE: Microsoft.Crm.Sdk.Messages is still needed for WhoAmIRequest in ConnectAsync.
+// (Previously also used by BulkDeleteRequest before staging was removed.)
 
 namespace Fhn.Cdm.DataverseSync.Infrastructure.Dataverse;
 
 /// <summary>
-/// Dataverse CRUD operations with:
-///   - 3-stage retry pipeline (batch → retry failures → dead-letter)
-///   - SemaphoreSlim for parallel batch control
-///   - Polly for transient error retry (429, 503)
-///   - Server-side key-based queries for pre-warm lookups
+/// Dataverse module-update operations:
+///   - BatchUpdateAsync     — 3-stage retry pipeline (batch → retry failures → dead-letter)
+///   - QueryByKeysAsync     — parallel chunked queries for pre-warm lookup dicts
+///   - ConnectAsync         — WhoAmI health probe
+/// SemaphoreSlim throttles parallel batches; Polly handles transient 429/503.
 /// </summary>
 public class DataverseRepository : IDataverseRepository
 {
@@ -68,179 +70,13 @@ public class DataverseRepository : IDataverseRepository
     }
 
     // ═══════════════════════════════════════════════════
-    // BATCH INSERT (for staging table)
-    // ═══════════════════════════════════════════════════
-
-    public async Task<(int Succeeded, int Failed, List<FailedRecord> Failures)> BatchInsertAsync(
-        List<Entity> entities, CancellationToken ct = default)
-    {
-        return await ExecuteBatchOperationAsync(entities, isInsert: true, ct);
-    }
-
-    // ═══════════════════════════════════════════════════
     // BATCH UPDATE (for module tables)
     // ═══════════════════════════════════════════════════
 
     public async Task<(int Succeeded, int Failed, List<FailedRecord> Failures)> BatchUpdateAsync(
         List<Entity> entities, CancellationToken ct = default)
     {
-        return await ExecuteBatchOperationAsync(entities, isInsert: false, ct);
-    }
-
-    // ═══════════════════════════════════════════════════
-    // DELETE ALL (full staging truncate, no filter)
-    // ═══════════════════════════════════════════════════
-    //
-    // Uses BulkDeleteRequest — an async system job. The server enumerates the
-    // target rows and deletes them on background workers, so the work does NOT
-    // accumulate against Dataverse's 1,200,000 ms / 5-min combined-execution-time
-    // service-protection limit. Replaced an ExecuteMultiple-of-DeleteRequest path
-    // that tripped that limit on ~142K rows.
-
-    /// <summary>
-    /// Returns true if the entity has zero rows. One cheap RetrieveMultiple with TopCount=1
-    /// and no columns — used to skip the truncate path when there's nothing to delete.
-    /// </summary>
-    public async Task<bool> IsTableEmptyAsync(string entityName, CancellationToken ct = default)
-    {
-        var client = await _factory.GetClientAsync(ct);
-        var query = new QueryExpression(entityName)
-        {
-            ColumnSet = new ColumnSet(false),
-            TopCount = 1
-        };
-
-        var response = await client.RetrieveMultipleAsync(query, ct);
-        var empty = response.Entities.Count == 0;
-
-        _logger.LogInformation(
-            "EventName={EventName} Table={Table} IsEmpty={IsEmpty}",
-            "IsTableEmptyCheck", entityName, empty);
-
-        return empty;
-    }
-
-    public async Task<int> DeleteAllAsync(string entityName, CancellationToken ct = default)
-    {
-        var client = await _factory.GetClientAsync(ct);
-        var overallSw = System.Diagnostics.Stopwatch.StartNew();
-
-        _logger.LogInformation(
-            "EventName={EventName} Table={Table} PollIntervalSec={Interval} TimeoutMin={Timeout}",
-            "TruncateStarted", entityName,
-            _settings.BulkDeletePollIntervalSeconds, _settings.BulkDeleteTimeoutMinutes);
-
-        var bulkDeleteRequest = new BulkDeleteRequest
-        {
-            JobName = $"Truncate-{entityName}-{DateTime.UtcNow:yyyyMMddHHmmss}",
-            QuerySet = new[]
-            {
-                new QueryExpression(entityName) { ColumnSet = new ColumnSet(false) }
-            },
-            StartDateTime = DateTime.UtcNow,
-            SendEmailNotification = false,
-            ToRecipients = Array.Empty<Guid>(),
-            CCRecipients = Array.Empty<Guid>(),
-            RecurrencePattern = string.Empty
-        };
-
-        BulkDeleteResponse submitResponse = null!;
-        await _retryPipeline.ExecuteAsync(async token =>
-        {
-            submitResponse = (BulkDeleteResponse)await client.ExecuteAsync(bulkDeleteRequest, token);
-        }, ct);
-
-        var jobId = submitResponse.JobId;
-        _logger.LogInformation(
-            "EventName={EventName} Table={Table} JobId={JobId}",
-            "TruncateJobSubmitted", entityName, jobId);
-
-        var deletedCount = await WaitForBulkDeleteAsync(client, entityName, jobId, ct);
-
-        overallSw.Stop();
-        _logger.LogInformation(
-            "EventName={EventName} Table={Table} Deleted={Deleted} ElapsedSec={Elapsed:F1} Rate={Rate:F0}/s",
-            "TruncateComplete", entityName, deletedCount,
-            overallSw.Elapsed.TotalSeconds,
-            deletedCount / Math.Max(overallSw.Elapsed.TotalSeconds, 0.001));
-
-        return deletedCount;
-    }
-
-    private async Task<int> WaitForBulkDeleteAsync(
-        ServiceClient client, string entityName, Guid jobId, CancellationToken ct)
-    {
-        var pollInterval = TimeSpan.FromSeconds(_settings.BulkDeletePollIntervalSeconds);
-        var timeout = TimeSpan.FromMinutes(_settings.BulkDeleteTimeoutMinutes);
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        int lastLoggedStatus = -1;
-
-        while (true)
-        {
-            if (sw.Elapsed >= timeout)
-                throw new TimeoutException(
-                    $"BulkDelete job {jobId} for {entityName} did not complete within {timeout.TotalMinutes:F0} min");
-
-            await Task.Delay(pollInterval, ct);
-
-            Entity job = null!;
-            await _retryPipeline.ExecuteAsync(async token =>
-            {
-                job = await client.RetrieveAsync(
-                    "asyncoperation", jobId,
-                    new ColumnSet("statecode", "statuscode", "friendlymessage", "message"), token);
-            }, ct);
-
-            var stateCode  = ((OptionSetValue)job["statecode"]).Value;
-            var statusCode = ((OptionSetValue)job["statuscode"]).Value;
-
-            if (statusCode != lastLoggedStatus)
-            {
-                _logger.LogInformation(
-                    "EventName={EventName} Table={Table} JobId={JobId} State={State} Status={Status} ElapsedSec={Elapsed:F1}",
-                    "TruncateJobPoll", entityName, jobId, stateCode, statusCode, sw.Elapsed.TotalSeconds);
-                lastLoggedStatus = statusCode;
-            }
-
-            // statecode 3 = Completed (terminal). Anything else means still running.
-            if (stateCode != 3) continue;
-
-            // statuscode 30 = Succeeded. Any other terminal status is a failure.
-            if (statusCode == 30)
-                return await GetBulkDeleteSuccessCountAsync(client, jobId, ct);
-
-            var message = job.Contains("message") ? job["message"]?.ToString() : null;
-            var friendly = job.Contains("friendlymessage") ? job["friendlymessage"]?.ToString() : null;
-            throw new InvalidOperationException(
-                $"BulkDelete job {jobId} for {entityName} terminated with Status={statusCode}. " +
-                $"FriendlyMessage='{friendly}' Message='{message}'");
-        }
-    }
-
-    private async Task<int> GetBulkDeleteSuccessCountAsync(
-        ServiceClient client, Guid jobId, CancellationToken ct)
-    {
-        var query = new QueryExpression("bulkdeleteoperation")
-        {
-            ColumnSet = new ColumnSet("successcount", "failurecount")
-        };
-        query.Criteria.AddCondition("asyncoperationid", ConditionOperator.Equal, jobId);
-
-        var result = await client.RetrieveMultipleAsync(query, ct);
-        if (result.Entities.Count == 0) return 0;
-
-        var op = result.Entities[0];
-        var success = op.Contains("successcount") ? (int)op["successcount"] : 0;
-        var failure = op.Contains("failurecount") ? (int)op["failurecount"] : 0;
-
-        if (failure > 0)
-        {
-            _logger.LogWarning(
-                "EventName={EventName} JobId={JobId} Success={Success} Failure={Failure}",
-                "TruncateJobPartialFailure", jobId, success, failure);
-        }
-
-        return success;
+        return await ExecuteBatchOperationAsync(entities, ct);
     }
 
     // ═══════════════════════════════════════════════════
@@ -332,11 +168,10 @@ public class DataverseRepository : IDataverseRepository
     // ═══════════════════════════════════════════════════
 
     private async Task<(int Succeeded, int Failed, List<FailedRecord> Failures)>
-        ExecuteBatchOperationAsync(List<Entity> entities, bool isInsert, CancellationToken ct)
+        ExecuteBatchOperationAsync(List<Entity> entities, CancellationToken ct)
     {
         if (entities.Count == 0) return (0, 0, new List<FailedRecord>());
 
-        var op = isInsert ? "Insert" : "Update";
         var sw = System.Diagnostics.Stopwatch.StartNew();
         int totalSucceeded = 0;
         int totalFailed = 0;
@@ -350,8 +185,8 @@ public class DataverseRepository : IDataverseRepository
             .ToList();
 
         _logger.LogInformation(
-            "EventName={EventName} Op={Op} Entities={Entities} Batches={Batches} Parallelism={Parallelism}",
-            "BatchOpStarted", op, entities.Count, chunks.Count, _settings.MaxParallelBatches);
+            "EventName={EventName} Entities={Entities} Batches={Batches} Parallelism={Parallelism}",
+            "BatchUpdateStarted", entities.Count, chunks.Count, _settings.MaxParallelBatches);
 
         using var semaphore = new SemaphoreSlim(_settings.MaxParallelBatches);
 
@@ -361,15 +196,15 @@ public class DataverseRepository : IDataverseRepository
             var batchSw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                var (s, f, failures) = await ExecuteChunkWithRetryAsync(chunk, chunkIdx, isInsert, ct);
+                var (s, f, failures) = await ExecuteChunkWithRetryAsync(chunk, ct);
                 Interlocked.Add(ref totalSucceeded, s);
                 Interlocked.Add(ref totalFailed, f);
                 lock (allFailures) { allFailures.AddRange(failures); }
 
                 var newCompleted = Interlocked.Increment(ref batchesCompleted);
                 _logger.LogInformation(
-                    "EventName={EventName} Op={Op} Batch={Batch}/{Total} Succeeded={Succeeded} Failed={Failed} BatchMs={BatchMs} ElapsedSec={Elapsed:F1}",
-                    "BatchOpBatch", op, newCompleted, chunks.Count, s, f,
+                    "EventName={EventName} Batch={Batch}/{Total} Succeeded={Succeeded} Failed={Failed} BatchMs={BatchMs} ElapsedSec={Elapsed:F1}",
+                    "BatchUpdateBatch", newCompleted, chunks.Count, s, f,
                     batchSw.ElapsedMilliseconds, sw.Elapsed.TotalSeconds);
             }
             finally { semaphore.Release(); }
@@ -379,19 +214,19 @@ public class DataverseRepository : IDataverseRepository
 
         sw.Stop();
         _logger.LogInformation(
-            "EventName={EventName} Op={Op} Succeeded={Succeeded} Failed={Failed} ElapsedSec={Elapsed:F1}",
-            "BatchOpComplete", op, totalSucceeded, totalFailed, sw.Elapsed.TotalSeconds);
+            "EventName={EventName} Succeeded={Succeeded} Failed={Failed} ElapsedSec={Elapsed:F1}",
+            "BatchUpdateComplete", totalSucceeded, totalFailed, sw.Elapsed.TotalSeconds);
 
         return (totalSucceeded, totalFailed, allFailures);
     }
 
     private async Task<(int Succeeded, int Failed, List<FailedRecord> Failures)>
-        ExecuteChunkWithRetryAsync(List<Entity> chunk, int chunkIdx, bool isInsert, CancellationToken ct)
+        ExecuteChunkWithRetryAsync(List<Entity> chunk, CancellationToken ct)
     {
         var client = await _factory.GetClientAsync(ct);
 
         // ── STAGE 1: Send full batch ──
-        var (stage1Succeeded, stage1Failed) = await SendBatchAsync(client, chunk, isInsert, ct);
+        var (stage1Succeeded, stage1Failed) = await SendBatchAsync(client, chunk, ct);
 
         if (stage1Failed.Count == 0)
             return (stage1Succeeded, 0, new List<FailedRecord>());
@@ -401,7 +236,7 @@ public class DataverseRepository : IDataverseRepository
 
         // ── STAGE 2: Retry only the failed entities ──
         await Task.Delay(TimeSpan.FromSeconds(5), ct);
-        var (stage2Succeeded, stage2Failed) = await SendBatchAsync(client, stage1Failed.Select(f => f.Entity!).ToList(), isInsert, ct);
+        var (stage2Succeeded, stage2Failed) = await SendBatchAsync(client, stage1Failed.Select(f => f.Entity!).ToList(), ct);
 
         var totalSucceeded = stage1Succeeded + stage2Succeeded;
 
@@ -417,7 +252,7 @@ public class DataverseRepository : IDataverseRepository
     }
 
     private async Task<(int Succeeded, List<FailedRecord> Failures)>
-        SendBatchAsync(ServiceClient client, List<Entity> entities, bool isInsert, CancellationToken ct)
+        SendBatchAsync(ServiceClient client, List<Entity> entities, CancellationToken ct)
     {
         var failures = new List<FailedRecord>();
         var request = new ExecuteMultipleRequest
@@ -427,12 +262,7 @@ public class DataverseRepository : IDataverseRepository
         };
 
         foreach (var entity in entities)
-        {
-            if (isInsert)
-                request.Requests.Add(new CreateRequest { Target = entity });
-            else
-                request.Requests.Add(new UpdateRequest { Target = entity });
-        }
+            request.Requests.Add(new UpdateRequest { Target = entity });
 
         try
         {

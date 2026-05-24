@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Fhn.Cdm.DataverseSync.Application;
-using Fhn.Cdm.DataverseSync.Application.Mapping;
 using Fhn.Cdm.DataverseSync.Application.Transformations;
 using Fhn.Cdm.DataverseSync.Configuration;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
@@ -12,18 +11,13 @@ using Fhn.Cdm.DataverseSync.Domain.Models;
 namespace Fhn.Cdm.DataverseSync.Application.Services;
 
 /// <summary>
-/// Orchestrates the complete sync pipeline:
+/// Orchestrates the sync pipeline (processors-only — staging removed):
 ///
-///   Phase 1 — Compute MaxMonth + daily check (SQL COUNT vs tracking blob)
+///   Phase 1 — Compute MaxMonth + daily check (SQL row count vs tracking blob)
 ///   Phase 2 — First SQL pass: build match-key set for pre-warm
 ///   Phase 3 — Pre-warm module lookup dictionaries (parallel per module)
-///   Phase 4 — Two independent tracks run in parallel until both complete:
-///               • StagingTrack:  truncate → SQL stream → BatchInsert (audit copy)
-///               • ModulesTrack:  SQL stream → ProcessBatchAsync per module
-///             Each track has its own SQL reader and its own try/catch envelope,
-///             so a slow truncate no longer blocks module updates and a failure
-///             in one track doesn't abort the other.
-///   Phase 5 — Save tracking state (after both tracks join)
+///   Phase 4 — Stream SQL and run ProcessBatchAsync per module
+///   Phase 5 — Save tracking state
 ///
 /// Memory model: streaming — peak ~20 MB per active SQL batch.
 /// </summary>
@@ -88,9 +82,10 @@ public class SyncOrchestrator
         }
 
         var trackingState = await _tracking.LoadAsync(ct);
+        var currentMonthStr = maxMthKey.ToString();
 
         // New month resets abandonments — last month's failures don't apply to new data.
-        if (!string.IsNullOrEmpty(trackingState.Month) && trackingState.Month != maxMthKey.ToString())
+        if (!string.IsNullOrEmpty(trackingState.Month) && trackingState.Month != currentMonthStr)
         {
             _logger.LogInformation("Month changed {Old} → {New}. Clearing abandonment state.",
                 trackingState.Month, maxMthKey);
@@ -98,27 +93,73 @@ public class SyncOrchestrator
             {
                 m.AbandonedAt = null;
                 m.ConsecutiveFailureDays = 0;
-            }
-            if (trackingState.Staging != null)
-            {
-                trackingState.Staging.AbandonedAt = null;
-                trackingState.Staging.ConsecutiveFailureDays = 0;
+                // NOTE: LastCompletedMonth is NOT reset here — it naturally won't match
+                // the new currentMonthStr, so the module will run for the new month.
             }
         }
 
-        if (trackingState.Month == maxMthKey.ToString()
-            && trackingState.StagingLoadedCount == sqlRowCount
-            && trackingState.SqlRowCount == sqlRowCount)
+        // ── Decide which processors still have work to do this run ──
+        //
+        // Filter the registered processor list by tracking state:
+        //   - Drop processors that are AbandonedAt != null (gave up on them this month;
+        //     month-rollover above will un-abandon them next month).
+        //   - Drop processors that already completed this month with the same SQL row
+        //     count — their work is genuinely done, no point re-running pre-warm and
+        //     Phase 4 for them today.
+        //
+        // If nothing is left to do, exit early. This is the daily-cron's idempotency
+        // guarantee: once a module finishes a month, it doesn't run again until next
+        // month (or until SQL row count changes mid-month, which would indicate an
+        // upstream re-load).
+        var orderedProcessors = _processors.OrderBy(p => p.Order).ToList();
+
+        var abandonedModules = trackingState.Modules
+            .Where(kvp => kvp.Value.AbandonedAt != null)
+            .Select(kvp => kvp.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var completedModules = trackingState.Modules
+            .Where(kvp => kvp.Value.LastCompletedMonth == currentMonthStr
+                       && kvp.Value.LastCompletedSqlRowCount == sqlRowCount)
+            .Select(kvp => kvp.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var pendingProcessors = orderedProcessors
+            .Where(p => !abandonedModules.Contains(p.ModuleName)
+                     && !completedModules.Contains(p.ModuleName))
+            .ToList();
+
+        if (abandonedModules.Count > 0)
+        {
+            _logger.LogWarning(
+                "EventName={EventName} SkippedCount={Count} Modules={Modules}",
+                "AbandonedModuleSkipped", abandonedModules.Count, string.Join(",", abandonedModules));
+            foreach (var name in abandonedModules)
+                result.Errors.Add($"[{name}] Skipped — abandoned at {trackingState.Modules[name].AbandonedAt:o}");
+        }
+
+        if (completedModules.Count > 0)
         {
             _logger.LogInformation(
-                "No new data. Month={Month}, SQL={Sql}, Tracked={Tracked}. Exiting.",
-                maxMthKey, sqlRowCount, trackingState.StagingLoadedCount);
+                "EventName={EventName} Month={Month} SkippedCount={Count} Modules={Modules}",
+                "ModulesAlreadyCompleted", currentMonthStr, completedModules.Count,
+                string.Join(",", completedModules));
+        }
+
+        if (pendingProcessors.Count == 0)
+        {
+            _logger.LogInformation(
+                "EventName={EventName} Month={Month} SqlRowCount={SqlRowCount}",
+                "NothingToProcess", currentMonthStr, sqlRowCount);
+            result.MthKey = maxMthKey;
             result.Duration = sw.Elapsed;
             return result;
         }
 
-        _logger.LogInformation("New/changed data detected. Month={Month}, SQL={Sql}, LastTracked={Last}",
-            maxMthKey, sqlRowCount, trackingState.StagingLoadedCount);
+        _logger.LogInformation(
+            "EventName={EventName} Month={Month} SqlRowCount={SqlRowCount} PendingModules={Pending}",
+            "WorkPending", currentMonthStr, sqlRowCount,
+            string.Join(",", pendingProcessors.Select(p => p.ModuleName)));
 
         result.MthKey = maxMthKey;
 
@@ -158,41 +199,18 @@ public class SyncOrchestrator
         // ═══════════════════════════════════════════════
         // PHASE 3: Pre-warm module lookup dictionaries (parallel)
         // ───────────────────────────────────────────────
-        // The previous design ran the staging truncate alongside pre-warm here.
-        // We learned that the bulk-delete async job often dominated wall-clock
-        // (>30 min), forcing modules to wait when their data dependencies were
-        // already satisfied. Truncate is now part of the staging track in Phase 4
-        // so modules can start as soon as pre-warm completes.
+        // Only the pendingProcessors set (computed in Phase 1) participates here.
+        // Abandoned and already-completed modules were filtered out before we even
+        // got this far.
         // ═══════════════════════════════════════════════
         _logger.LogInformation(
-            "EventName={EventName} Table={Table}",
-            "Phase3Started", StagingEntityMapper.EntityLogicalName);
-
-        var orderedProcessors = _processors.OrderBy(p => p.Order).ToList();
-
-        // Skip processors whose tracking state has been abandoned via MaxConsecutiveFailureDays.
-        var abandonedModules = trackingState.Modules
-            .Where(kvp => kvp.Value.AbandonedAt != null)
-            .Select(kvp => kvp.Key)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var activeProcessors = orderedProcessors
-            .Where(p => !abandonedModules.Contains(p.ModuleName))
-            .ToList();
-
-        if (abandonedModules.Count > 0)
-        {
-            _logger.LogWarning(
-                "EventName={EventName} SkippedCount={Count} Modules={Modules}",
-                "AbandonedModuleSkipped", abandonedModules.Count, string.Join(",", abandonedModules));
-            foreach (var name in abandonedModules)
-                result.Errors.Add($"[{name}] Skipped — abandoned at {trackingState.Modules[name].AbandonedAt:o}");
-        }
+            "EventName={EventName} PendingProcessors={Count}",
+            "Phase3Started", pendingProcessors.Count);
 
         // Pre-warm tasks fan out per module. Each task captures its own success/failure
         // so we can fail-fast below — without this guard, a pre-warm auth failure
         // cascades into N batches of doomed module updates.
-        var preWarmTasks = activeProcessors.Select(async p =>
+        var preWarmTasks = pendingProcessors.Select(async p =>
         {
             try
             {
@@ -227,75 +245,51 @@ public class SyncOrchestrator
 
         _logger.LogInformation(
             "EventName={EventName} ActiveProcessors={Count}",
-            "Phase3Complete", activeProcessors.Count);
+            "Phase3Complete", pendingProcessors.Count);
 
         // ═══════════════════════════════════════════════
-        // PHASE 4: Two independent tracks in parallel
-        // ───────────────────────────────────────────────
-        // StagingTrack: truncate → SQL stream → BatchInsert
-        // ModulesTrack: SQL stream → ProcessBatchAsync per module
-        //
-        // Each track has its own SQL reader (two independent connections, two
-        // sequential passes over the same MTH_KEY partition) and its own try/catch.
-        // They share no mutable state; failure of one does not abort the other.
-        // Phase 5 waits for both via Task.WhenAll before saving tracking state.
+        // PHASE 4: Stream SQL → run module processors per batch
         // ═══════════════════════════════════════════════
         var phase4Sw = Stopwatch.StartNew();
         _logger.LogInformation(
             "EventName={EventName} ActiveProcessors={ModuleCount} SqlBatchSize={SqlBatchSize}",
-            "Phase4Started", activeProcessors.Count, _settings.SqlBatchSize);
+            "Phase4Started", pendingProcessors.Count, _settings.SqlBatchSize);
 
-        var stagingTrackTask = ExecuteStagingTrackAsync(maxMthKey, ct);
-        var modulesTrackTask = ExecuteModulesTrackAsync(maxMthKey, activeProcessors, ct);
-
-        await Task.WhenAll(stagingTrackTask, modulesTrackTask);
-
-        var stagingMetrics = await stagingTrackTask;
-        var moduleResults = await modulesTrackTask;
-
-        // Fold staging metrics into the SyncResult.
-        result.StagingRowsInserted = stagingMetrics.Succeeded;
-        result.StagingRowsFailed = stagingMetrics.Failed;
-        var stagingFailures = stagingMetrics.Failures;
+        var (moduleResults, totalRowsRead) = await ExecuteModulesTrackAsync(maxMthKey, pendingProcessors, ct);
 
         // Fold module results into the SyncResult.
-        foreach (var (moduleName, moduleResult) in moduleResults)
+        foreach (var kvp in moduleResults)
         {
-            result.ModuleResults[moduleName] = moduleResult;
+            result.ModuleResults[kvp.Key] = kvp.Value;
         }
 
-        // TotalRowsRead comes from the modules track (always runs); both tracks read
-        // the same SQL partition so the count is the same either way.
-        result.TotalRowsRead = moduleResults.Values.Sum(m => m.RowsProcessed + m.RowsSkipped);
+        // TotalRowsRead comes from the actual SQL stream in the modules track —
+        // NOT from summing per-module counters (each module sees every row, so summing
+        // would multiply by the module count).
+        result.TotalRowsRead = totalRowsRead;
 
         phase4Sw.Stop();
         _logger.LogInformation(
-            "EventName={EventName} StagingSucceeded={Ok} StagingFailed={Failed} ElapsedSec={Elapsed:F1}",
-            "Phase4Complete", stagingMetrics.Succeeded, stagingMetrics.Failed,
-            phase4Sw.Elapsed.TotalSeconds);
+            "EventName={EventName} ElapsedSec={Elapsed:F1}",
+            "Phase4Complete", phase4Sw.Elapsed.TotalSeconds);
 
-        // Correlation id for the error-table rows: Activity.Current.RootId carries the
-        // Functions invocation id (set by the worker host), giving us a join key with
-        // App Insights operation_Id. Fall back to a fresh GUID if no Activity exists
-        // (e.g., when run outside the Functions host during tests).
+        // Correlation id for error-table rows. Activity.Current.RootId carries the
+        // Functions invocation id (set by the worker host), giving us a join key
+        // with App Insights operation_Id.
         var invocationId = System.Diagnostics.Activity.Current?.RootId
                            ?? Guid.NewGuid().ToString();
 
-        // Dead-letter staging failures
-        if (stagingFailures.Count > 0)
-            await _deadLetter.WriteAsync("Staging", maxMthKey, invocationId, stagingFailures, ct);
-
         // Dead-letter module failures
-        foreach (var (moduleName, moduleResult) in result.ModuleResults)
+        foreach (var kvp in result.ModuleResults)
         {
-            if (moduleResult.Failures.Count > 0)
-                await _deadLetter.WriteAsync(moduleName, maxMthKey, invocationId, moduleResult.Failures, ct);
+            if (kvp.Value.Failures.Count > 0)
+                await _deadLetter.WriteAsync(kvp.Key, maxMthKey, invocationId, kvp.Value.Failures, ct);
         }
 
         // ═══════════════════════════════════════════════
         // PHASE 5: Save tracking state
         // ═══════════════════════════════════════════════
-        var newState = BuildTrackingState(maxMthKey, sqlRowCount, result, stagingFailures, trackingState);
+        var newState = BuildTrackingState(maxMthKey, sqlRowCount, result, trackingState);
 
         // Carry forward state for abandoned modules we skipped this run, so their AbandonedAt sticks.
         foreach (var name in abandonedModules)
@@ -314,102 +308,6 @@ public class SyncOrchestrator
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // Phase 4 — Staging track
-    // ───────────────────────────────────────────────────────────────────
-    // 1. Truncate staging if it has rows (skip the BulkDelete entirely when
-    //    already empty — eg. first run, or after a clean prior cycle).
-    // 2. Open a fresh SQL stream and insert each batch into the staging table.
-    //
-    // Owns: its own SqlMiDataReader connection, its own Dataverse batch calls,
-    //       its own failure aggregation. Catches all exceptions so the modules
-    //       track is never aborted by a staging problem.
-    // ═══════════════════════════════════════════════════════════════════
-    private async Task<(int Succeeded, int Failed, List<FailedRecord> Failures)>
-        ExecuteStagingTrackAsync(int maxMthKey, CancellationToken ct)
-    {
-        var sw = Stopwatch.StartNew();
-        int succeeded = 0;
-        int failed = 0;
-        var failures = new List<FailedRecord>();
-
-        try
-        {
-            _logger.LogInformation(
-                "EventName={EventName} Table={Table}",
-                "StagingTrackStarted", StagingEntityMapper.EntityLogicalName);
-
-            // ── Truncate (or skip if already empty) ──
-            var stagingHasRows = !await _repository.IsTableEmptyAsync(
-                StagingEntityMapper.EntityLogicalName, ct);
-
-            if (stagingHasRows)
-            {
-                await _repository.DeleteAllAsync(StagingEntityMapper.EntityLogicalName, ct);
-            }
-            else
-            {
-                _logger.LogInformation(
-                    "EventName={EventName} Table={Table} Reason=AlreadyEmpty",
-                    "TruncateSkipped", StagingEntityMapper.EntityLogicalName);
-            }
-
-            // ── SQL stream → staging inserts ──
-            int batchNum = 0;
-            await foreach (var sqlBatch in _sqlReader.StreamBatchesAsync(maxMthKey, _settings.SqlBatchSize, ct))
-            {
-                batchNum++;
-                var batchSw = Stopwatch.StartNew();
-
-                var transformed = CommonTransformation.TransformBatch(sqlBatch);
-                var stagingEntities = StagingEntityMapper.MapBatch(transformed);
-
-                var batchResult = await _repository.BatchInsertAsync(stagingEntities, ct);
-                succeeded += batchResult.Succeeded;
-                failed += batchResult.Failed;
-
-                // Enrich staging failures with AccountNumber + LoanIdentifier directly
-                // from the insert entity's attributes — StagingEntityMapper.MapBatch
-                // already set these on every entity, but the dead-letter writer wants
-                // them as first-class fields, not buried in Entity.Attributes.
-                foreach (var failure in batchResult.Failures)
-                {
-                    if (failure.Entity != null)
-                    {
-                        failure.AccountNumber = failure.Entity.Contains("crbee_accountnumber")
-                            ? failure.Entity["crbee_accountnumber"]?.ToString()
-                            : null;
-                        failure.LoanIdentifier = failure.Entity.Contains("crbee_loanidentifier")
-                            ? failure.Entity["crbee_loanidentifier"] as int?
-                            : null;
-                    }
-                }
-                failures.AddRange(batchResult.Failures);
-
-                batchSw.Stop();
-                _logger.LogInformation(
-                    "EventName={EventName} Batch={Batch} BatchRows={Rows} Succeeded={Ok} Failed={Failed} BatchSec={BatchSec:F1} TrackElapsedSec={Elapsed:F1}",
-                    "StagingBatchComplete", batchNum, stagingEntities.Count,
-                    batchResult.Succeeded, batchResult.Failed,
-                    batchSw.Elapsed.TotalSeconds, sw.Elapsed.TotalSeconds);
-            }
-
-            sw.Stop();
-            _logger.LogInformation(
-                "EventName={EventName} Succeeded={Ok} Failed={Failed} Batches={Batches} ElapsedSec={Elapsed:F1}",
-                "StagingTrackComplete", succeeded, failed, batchNum, sw.Elapsed.TotalSeconds);
-        }
-        catch (Exception ex)
-        {
-            sw.Stop();
-            _logger.LogError(ex,
-                "EventName={EventName} ElapsedSec={Elapsed:F1}",
-                "StagingTrackFailed", sw.Elapsed.TotalSeconds);
-        }
-
-        return (succeeded, failed, failures);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
     // Phase 4 — Modules track
     // ───────────────────────────────────────────────────────────────────
     // Opens its own SQL stream and, for each batch, fans out across every
@@ -420,13 +318,15 @@ public class SyncOrchestrator
     // module failure. Per-batch per-module exceptions are also caught
     // individually so one bad module doesn't break the others.
     // ═══════════════════════════════════════════════════════════════════
-    private async Task<Dictionary<string, ModuleResult>> ExecuteModulesTrackAsync(
-        int maxMthKey,
-        List<IModuleProcessor> activeProcessors,
-        CancellationToken ct)
+    private async Task<(Dictionary<string, ModuleResult> Results, int TotalRowsRead)>
+        ExecuteModulesTrackAsync(
+            int maxMthKey,
+            List<IModuleProcessor> activeProcessors,
+            CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
         var results = new Dictionary<string, ModuleResult>(StringComparer.OrdinalIgnoreCase);
+        int totalRowsRead = 0;
 
         try
         {
@@ -438,6 +338,7 @@ public class SyncOrchestrator
             await foreach (var sqlBatch in _sqlReader.StreamBatchesAsync(maxMthKey, _settings.SqlBatchSize, ct))
             {
                 batchNum++;
+                totalRowsRead += sqlBatch.Count;
                 var batchSw = Stopwatch.StartNew();
 
                 var transformed = CommonTransformation.TransformBatch(sqlBatch);
@@ -487,55 +388,44 @@ public class SyncOrchestrator
 
             sw.Stop();
             _logger.LogInformation(
-                "EventName={EventName} Batches={Batches} Modules={Modules} ElapsedSec={Elapsed:F1}",
-                "ModulesTrackComplete", batchNum, results.Count, sw.Elapsed.TotalSeconds);
+                "EventName={EventName} Batches={Batches} Modules={Modules} TotalRowsRead={Rows} ElapsedSec={Elapsed:F1}",
+                "ModulesTrackComplete", batchNum, results.Count, totalRowsRead, sw.Elapsed.TotalSeconds);
         }
         catch (Exception ex)
         {
             sw.Stop();
             _logger.LogError(ex,
-                "EventName={EventName} ElapsedSec={Elapsed:F1}",
-                "ModulesTrackFailed", sw.Elapsed.TotalSeconds);
+                "EventName={EventName} RowsReadSoFar={Rows} ElapsedSec={Elapsed:F1}",
+                "ModulesTrackFailed", totalRowsRead, sw.Elapsed.TotalSeconds);
         }
 
-        return results;
+        return (results, totalRowsRead);
     }
 
     private TrackingState BuildTrackingState(
         int mthKey,
         long sqlRowCount,
         SyncResult result,
-        List<FailedRecord> stagingFailures,
         TrackingState previousState)
     {
+        var currentMonthStr = mthKey.ToString();
         var state = new TrackingState
         {
-            Month = mthKey.ToString(),
+            Month = currentMonthStr,
             SqlRowCount = sqlRowCount,
-            StagingLoadedCount = result.StagingRowsInserted,
             LastRunDate = DateTime.UtcNow
         };
 
-        // Staging: synthetic ModuleResult so it goes through the same abandonment pipeline.
-        var stagingPrev = previousState.Staging ?? new ModuleTrackingState();
-        var stagingPseudoResult = new ModuleResult
-        {
-            ModuleName = "Staging",
-            RowsUpdated = result.StagingRowsInserted,
-            RowsFailed = result.StagingRowsFailed,
-            Failures = stagingFailures
-        };
-        state.Staging = UpdateModuleTrackingState(stagingPrev, stagingPseudoResult);
+        // Carry forward every previously-known module's state, then overwrite the ones
+        // we processed this run. This preserves LastCompletedMonth for modules we
+        // skipped today (already completed this month / abandoned) so they stay skipped.
+        foreach (var kvp in previousState.Modules)
+            state.Modules[kvp.Key] = kvp.Value;
 
-        // If staging was just abandoned, mark count as fully loaded so the daily check stops
-        // re-triggering full truncate-and-reloads of a permanently broken dataset.
-        if (state.Staging.AbandonedAt != null)
-            state.StagingLoadedCount = sqlRowCount;
-
-        foreach (var (moduleName, moduleResult) in result.ModuleResults)
+        foreach (var kvp in result.ModuleResults)
         {
-            var prevModule = previousState.Modules.GetValueOrDefault(moduleName) ?? new ModuleTrackingState();
-            state.Modules[moduleName] = UpdateModuleTrackingState(prevModule, moduleResult);
+            var prevModule = previousState.Modules.GetValueOrDefault(kvp.Key) ?? new ModuleTrackingState();
+            state.Modules[kvp.Key] = UpdateModuleTrackingState(prevModule, kvp.Value, currentMonthStr, sqlRowCount);
         }
 
         return state;
@@ -543,16 +433,48 @@ public class SyncOrchestrator
 
     /// <summary>
     /// Updates a ModuleTrackingState from the latest ModuleResult.
-    /// Handles consecutive-failure streak, hash comparison, and MaxConsecutiveFailureDays abandonment.
+    /// Handles consecutive-failure streak, hash comparison, MaxConsecutiveFailureDays
+    /// abandonment, and the LastCompletedMonth marker that lets the daily-cron skip
+    /// already-finished modules.
     /// </summary>
-    private ModuleTrackingState UpdateModuleTrackingState(ModuleTrackingState prev, ModuleResult moduleResult)
+    private ModuleTrackingState UpdateModuleTrackingState(
+        ModuleTrackingState prev,
+        ModuleResult moduleResult,
+        string currentMonth,
+        long sqlRowCount)
     {
         var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
         var next = new ModuleTrackingState { SuccessCount = moduleResult.RowsUpdated };
 
+        // Did this run see every SQL row? Required (alongside zero failures) before we
+        // can mark the module complete-for-the-month. If the SQL stream broke off
+        // mid-way, RowsProcessed + RowsSkipped < sqlRowCount and we don't set the flag.
+        bool sawAllRows = (moduleResult.RowsProcessed + moduleResult.RowsSkipped) == sqlRowCount;
+
         if (moduleResult.Failures.Count == 0)
         {
             // Success — clear failure streak and any prior abandonment.
+            // Mark completion only when we also saw every SQL row this run.
+            if (sawAllRows)
+            {
+                next.LastCompletedMonth = currentMonth;
+                next.LastCompletedSqlRowCount = sqlRowCount;
+                _logger.LogInformation(
+                    "EventName={EventName} Module={Module} Month={Month} SqlRowCount={SqlRowCount} Updated={Updated}",
+                    "ModuleCompleted", moduleResult.ModuleName, currentMonth, sqlRowCount, moduleResult.RowsUpdated);
+            }
+            else
+            {
+                // Carry forward whatever was previously known — don't lose a prior completion
+                // marker just because this run was a no-op (e.g., outer cancellation).
+                next.LastCompletedMonth = prev.LastCompletedMonth;
+                next.LastCompletedSqlRowCount = prev.LastCompletedSqlRowCount;
+
+                _logger.LogWarning(
+                    "EventName={EventName} Module={Module} RowsProcessed={Processed} RowsSkipped={Skipped} ExpectedSqlRowCount={Expected}",
+                    "ModuleIncompleteStream", moduleResult.ModuleName,
+                    moduleResult.RowsProcessed, moduleResult.RowsSkipped, sqlRowCount);
+            }
             return next;
         }
 
@@ -569,6 +491,13 @@ public class SyncOrchestrator
         next.LastFailureDate = today;
         next.LastFailedHash = hash;
         next.LastFailedKeys = failedKeys;
+
+        // On a failed run, the module is NOT complete for this month — carry forward
+        // the previous completion marker (which would be from an earlier month, or
+        // null if we've never finished). The day-check will see it doesn't match the
+        // current month and the module will retry tomorrow.
+        next.LastCompletedMonth = prev.LastCompletedMonth;
+        next.LastCompletedSqlRowCount = prev.LastCompletedSqlRowCount;
 
         // Preserve prior abandonment; raise a new one when the threshold trips.
         next.AbandonedAt = prev.AbandonedAt;

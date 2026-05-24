@@ -94,7 +94,7 @@ public class BlobTrackingService : ITrackingService
             _lastETag = response.Value.ETag;
         }
 
-        _logger.LogInformation("Tracking state saved: Month={Month}, Staging={Staging}",
-            state.Month, state.StagingLoadedCount);
+        _logger.LogInformation("Tracking state saved: Month={Month}, SqlRowCount={SqlRowCount}",
+            state.Month, state.SqlRowCount);
     }
 }

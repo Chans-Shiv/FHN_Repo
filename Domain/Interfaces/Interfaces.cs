@@ -24,12 +24,8 @@ public interface ISqlDataReader
 public interface IDataverseRepository
 {
     Task<bool> ConnectAsync(CancellationToken ct = default);
-    Task<(int Succeeded, int Failed, List<FailedRecord> Failures)> BatchInsertAsync(
-        List<Entity> entities, CancellationToken ct = default);
     Task<(int Succeeded, int Failed, List<FailedRecord> Failures)> BatchUpdateAsync(
         List<Entity> entities, CancellationToken ct = default);
-    Task<int> DeleteAllAsync(string entityName, CancellationToken ct = default);
-    Task<bool> IsTableEmptyAsync(string entityName, CancellationToken ct = default);
     Task<Dictionary<string, Entity>> QueryByKeysAsync(
         string entityName, string keyColumn, List<string> keyValues,
         string[] columnsToRetrieve, FilterExpression? additionalFilter = null,

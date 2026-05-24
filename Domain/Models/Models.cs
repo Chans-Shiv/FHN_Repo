@@ -6,15 +6,12 @@ public class SyncResult
 {
     public int MthKey { get; set; }
     public int TotalRowsRead { get; set; }
-    public int StagingRowsInserted { get; set; }
-    public int StagingRowsFailed { get; set; }
     public Dictionary<string, ModuleResult> ModuleResults { get; set; } = new();
     public TimeSpan Duration { get; set; }
     public List<string> Errors { get; set; } = new();
 
     public string Summary =>
         $"MthKey={MthKey}, Read={TotalRowsRead}, " +
-        $"Staged={StagingRowsInserted}/{StagingRowsFailed}f, " +
         $"Modules=[{string.Join(", ", ModuleResults.Select(m => $"{m.Key}:{m.Value.RowsUpdated}u/{m.Value.RowsFailed}f/{m.Value.RowsSkipped}s"))}], " +
         $"Duration={Duration:hh\\:mm\\:ss}";
 }
@@ -59,9 +56,7 @@ public class TrackingState
 {
     public string Month { get; set; } = string.Empty;
     public long SqlRowCount { get; set; }
-    public long StagingLoadedCount { get; set; }
     public DateTime LastRunDate { get; set; }
-    public ModuleTrackingState? Staging { get; set; }
     public Dictionary<string, ModuleTrackingState> Modules { get; set; } = new();
 }
 
@@ -75,4 +70,17 @@ public class ModuleTrackingState
 
     /// <summary>Set when MaxConsecutiveFailureDays is reached. Subsequent scheduled runs skip this module.</summary>
     public DateTime? AbandonedAt { get; set; }
+
+    /// <summary>
+    /// MTH_KEY of the month this module last finished cleanly (RowsFailed=0 AND saw every SQL row).
+    /// Combined with <see cref="LastCompletedSqlRowCount"/>, subsequent runs skip this module until
+    /// the month rolls over or the SQL row count changes.
+    /// </summary>
+    public string? LastCompletedMonth { get; set; }
+
+    /// <summary>
+    /// SQL row count at the time <see cref="LastCompletedMonth"/> was recorded. If SQL grows
+    /// mid-month (upstream re-load), this won't match the current count and the module re-runs.
+    /// </summary>
+    public long? LastCompletedSqlRowCount { get; set; }
 }
