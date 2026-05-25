@@ -1,3 +1,5 @@
+using Azure.Identity;
+using Azure.Storage.Queues;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -29,15 +31,35 @@ var host = new HostBuilder()
             TrackingContainerName = Environment.GetEnvironmentVariable("TrackingContainerName") ?? "sync-state",
             TrackingBlobName = Environment.GetEnvironmentVariable("TrackingBlobName") ?? "tracking.json",
             ErrorTableEntityName = Environment.GetEnvironmentVariable("ErrorTableEntityName") ?? "crbee_consumercredit_errortable",
+            DeadLetterQueueName = Environment.GetEnvironmentVariable("DeadLetterQueueName") ?? "dead-letter-errors",
         };
         services.AddSingleton(settings);
+
+        // Storage Queue client used by QueueDeadLetterService to enqueue failed records.
+        // Endpoint is derived from TrackingStorageAccountUrl by swapping blob→queue, so
+        // tracking blob + dead-letter queue live on the same account (one identity grant).
+        // The QueueTrigger function reads from the SAME queue via the
+        // AzureWebJobsStorage connection — that must point at this same account.
+        services.AddSingleton(_ =>
+        {
+            var queueServiceUri = new Uri(
+                settings.TrackingStorageAccountUrl
+                    .Replace(".blob.core.windows.net", ".queue.core.windows.net"));
+            var serviceClient = new QueueServiceClient(queueServiceUri, new DefaultAzureCredential());
+            return serviceClient.GetQueueClient(settings.DeadLetterQueueName);
+        });
 
         // ── Infrastructure (external dependencies) ──
         services.AddSingleton<DataverseConnectionFactory>();
         services.AddTransient<ISqlDataReader, SqlMiDataReader>();
         services.AddTransient<IDataverseRepository, DataverseRepository>();
         services.AddTransient<ITrackingService, BlobTrackingService>();
-        services.AddTransient<IDeadLetterService, DataverseErrorTableService>();
+
+        // Dead-letter pipeline:
+        //   Orchestrator → IDeadLetterService (QueueDeadLetterService) → Storage Queue
+        //   QueueTrigger fn (DeadLetterProcessorFunction) → DataverseErrorTableService → Dataverse
+        services.AddTransient<IDeadLetterService, QueueDeadLetterService>();
+        services.AddTransient<DataverseErrorTableService>();
 
         // ── Module Processors (add new modules here) ──
         services.AddTransient<IModuleProcessor, ForeclosureProcessor>();

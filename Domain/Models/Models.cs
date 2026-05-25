@@ -60,6 +60,22 @@ public class TrackingState
     public Dictionary<string, ModuleTrackingState> Modules { get; set; } = new();
 }
 
+/// <summary>
+/// Wire format for one failed record in the dead-letter queue.
+/// Each message is processed independently by <c>DeadLetterProcessorFunction</c>.
+/// </summary>
+public class DeadLetterMessage
+{
+    public string ModuleName { get; set; } = string.Empty;
+    public int MthKey { get; set; }
+    public string InvocationId { get; set; } = string.Empty;
+    public string Key { get; set; } = string.Empty;
+    public string? AccountNumber { get; set; }
+    public int? LoanIdentifier { get; set; }
+    public string ErrorMessage { get; set; } = string.Empty;
+    public DateTimeOffset EnqueuedAt { get; set; }
+}
+
 public class ModuleTrackingState
 {
     public int SuccessCount { get; set; }

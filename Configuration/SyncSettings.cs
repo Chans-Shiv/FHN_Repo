@@ -39,4 +39,11 @@ public class SyncSettings
     /// falls back to App Insights structured logging.
     /// </summary>
     public string ErrorTableEntityName { get; set; } = "crbee_consumercredit_errortable";
+
+    /// <summary>
+    /// Storage Queue name buffering failed records before they're inserted into the
+    /// Dataverse error table. One message = one failed record. Default poison queue
+    /// (created automatically by the Functions runtime) is <c>{name}-poison</c>.
+    /// </summary>
+    public string DeadLetterQueueName { get; set; } = "dead-letter-errors";
 }

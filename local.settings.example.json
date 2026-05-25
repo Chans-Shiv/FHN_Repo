@@ -22,6 +22,9 @@
 
     "ErrorTableEntityName": "crbee_consumercredit_errortable",
 
+    "_comment_deadletter": "Storage Queue buffers failed records for retry against the Dataverse error table. AzureWebJobsStorage above is the connection used for the QueueTrigger. In Azure, prefer identity-based binding: set AzureWebJobsStorage__queueServiceUri = https://<storage-account>.queue.core.windows.net and grant the Function App's Managed Identity 'Storage Queue Data Contributor' on the storage account.",
+    "DeadLetterQueueName": "dead-letter-errors",
+
     "_comment_appinsights": "Optional. When unset the app runs fine and telemetry is discarded. Set it to start seeing traces/dependencies/exceptions in the Application Insights resource. Format: InstrumentationKey=<guid>;IngestionEndpoint=https://<region>.applicationinsights.azure.com/;...",
     "APPLICATIONINSIGHTS_CONNECTION_STRING": ""
   }
