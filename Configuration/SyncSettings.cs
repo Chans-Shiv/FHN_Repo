@@ -42,8 +42,18 @@ public class SyncSettings
 
     /// <summary>
     /// Storage Queue name buffering failed records before they're inserted into the
-    /// Dataverse error table. One message = one failed record. Default poison queue
-    /// (created automatically by the Functions runtime) is <c>{name}-poison</c>.
+    /// Dataverse error table. One message = one failed record. After
+    /// <c>maxDequeueCount</c> attempts (see host.json), the queue trigger writes the
+    /// record to <see cref="FailureBlobContainerName"/> + App Insights and ACKs the
+    /// message — so nothing should ever land in <c>{name}-poison</c>.
     /// </summary>
     public string DeadLetterQueueName { get; set; } = "dead-letter-errors";
+
+    /// <summary>
+    /// Blob container holding the date-partitioned archive of records that exhausted
+    /// all queue retries. Layout: <c>errors/yyyy/MM/dd/{invocationId}-{key}.json</c>.
+    /// Records here are the durable "we gave up" artifact; App Insights gets the same
+    /// payload logged as <c>EventName=DeadLetterGivenUp</c>.
+    /// </summary>
+    public string FailureBlobContainerName { get; set; } = "dead-letter-archive";
 }

@@ -1,4 +1,5 @@
 using Azure.Identity;
+using Azure.Storage.Blobs;
 using Azure.Storage.Queues;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.DependencyInjection;
@@ -32,6 +33,7 @@ var host = new HostBuilder()
             TrackingBlobName = Environment.GetEnvironmentVariable("TrackingBlobName") ?? "tracking.json",
             ErrorTableEntityName = Environment.GetEnvironmentVariable("ErrorTableEntityName") ?? "crbee_consumercredit_errortable",
             DeadLetterQueueName = Environment.GetEnvironmentVariable("DeadLetterQueueName") ?? "dead-letter-errors",
+            FailureBlobContainerName = Environment.GetEnvironmentVariable("FailureBlobContainerName") ?? "dead-letter-archive",
         };
         services.AddSingleton(settings);
 
@@ -49,6 +51,17 @@ var host = new HostBuilder()
             return serviceClient.GetQueueClient(settings.DeadLetterQueueName);
         });
 
+        // Blob container holding the durable archive of records that exhausted all
+        // queue retries (one blob per record, date-partitioned). Same storage account
+        // as tracking/queue — single identity grant covers everything.
+        services.AddSingleton(_ =>
+        {
+            var blobServiceClient = new BlobServiceClient(
+                new Uri(settings.TrackingStorageAccountUrl),
+                new DefaultAzureCredential());
+            return blobServiceClient.GetBlobContainerClient(settings.FailureBlobContainerName);
+        });
+
         // ── Infrastructure (external dependencies) ──
         services.AddSingleton<DataverseConnectionFactory>();
         services.AddTransient<ISqlDataReader, SqlMiDataReader>();
@@ -60,6 +73,7 @@ var host = new HostBuilder()
         //   QueueTrigger fn (DeadLetterProcessorFunction) → DataverseErrorTableService → Dataverse
         services.AddTransient<IDeadLetterService, QueueDeadLetterService>();
         services.AddTransient<DataverseErrorTableService>();
+        services.AddTransient<FailureBlobWriter>();
 
         // ── Module Processors (add new modules here) ──
         services.AddTransient<IModuleProcessor, ForeclosureProcessor>();
