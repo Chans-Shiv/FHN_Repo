@@ -42,12 +42,22 @@ var host = new HostBuilder()
         // tracking blob + dead-letter queue live on the same account (one identity grant).
         // The QueueTrigger function reads from the SAME queue via the
         // AzureWebJobsStorage connection — that must point at this same account.
+        //
+        // MessageEncoding = Base64: the WebJobs QueueTrigger extension expects
+        // base64-encoded message bodies by default. Azure.Storage.Queues v12+ ships
+        // with MessageEncoding=None, so without this option the consumer logs
+        // "Message decoding has failed!" and the message moves to poison after 5
+        // delivery attempts. Setting Base64 here makes the producer match the trigger.
         services.AddSingleton(_ =>
         {
             var queueServiceUri = new Uri(
                 settings.TrackingStorageAccountUrl
                     .Replace(".blob.core.windows.net", ".queue.core.windows.net"));
-            var serviceClient = new QueueServiceClient(queueServiceUri, new DefaultAzureCredential());
+            var options = new QueueClientOptions
+            {
+                MessageEncoding = QueueMessageEncoding.Base64
+            };
+            var serviceClient = new QueueServiceClient(queueServiceUri, new DefaultAzureCredential(), options);
             return serviceClient.GetQueueClient(settings.DeadLetterQueueName);
         });
 
