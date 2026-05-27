@@ -37,13 +37,20 @@ var host = new HostBuilder()
         };
         services.AddSingleton(settings);
 
-        // Excludes ManagedIdentityCredential from the credential chain in local dev so
-        // we don't end up picking a Managed Identity (from an IMDS proxy or developer
-        // VM) that lacks the storage RBAC roles. In Azure this option is harmless —
-        // the deployed function still authenticates via its own Managed Identity
-        // because the other credential sources (env vars, VS sign-in, az CLI) aren't
-        // present in the App Service host. Mirrors what DataverseConnectionFactory
-        // does for the same reason.
+        // Local dev escape hatch: if AzureWebJobsStorage is a connection string
+        // (typical local-dev setup), reuse it for our queue + blob clients so
+        // local runs don't depend on per-user RBAC grants — same identity story
+        // as the Functions host itself. In Azure, AzureWebJobsStorage uses
+        // identity-binding (no connection string) so we fall through to
+        // DefaultAzureCredential, where the deployed function's Managed Identity
+        // picks up the storage roles. ManagedIdentityCredential is excluded so
+        // local dev doesn't accidentally pick up an IMDS identity (VM / proxy)
+        // that lacks the storage RBAC roles. Mirrors DataverseConnectionFactory.
+        var storageConnectionString = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
+        var useConnectionString =
+            !string.IsNullOrWhiteSpace(storageConnectionString)
+            && storageConnectionString.Contains("AccountKey=", StringComparison.OrdinalIgnoreCase);
+
         var storageCredential = new DefaultAzureCredential(new DefaultAzureCredentialOptions
         {
             ExcludeManagedIdentityCredential = true
@@ -62,14 +69,23 @@ var host = new HostBuilder()
         // delivery attempts. Setting Base64 here makes the producer match the trigger.
         services.AddSingleton(_ =>
         {
-            var queueServiceUri = new Uri(
-                settings.TrackingStorageAccountUrl
-                    .Replace(".blob.core.windows.net", ".queue.core.windows.net"));
             var options = new QueueClientOptions
             {
                 MessageEncoding = QueueMessageEncoding.Base64
             };
-            var serviceClient = new QueueServiceClient(queueServiceUri, storageCredential, options);
+
+            QueueServiceClient serviceClient;
+            if (useConnectionString)
+            {
+                serviceClient = new QueueServiceClient(storageConnectionString, options);
+            }
+            else
+            {
+                var queueServiceUri = new Uri(
+                    settings.TrackingStorageAccountUrl
+                        .Replace(".blob.core.windows.net", ".queue.core.windows.net"));
+                serviceClient = new QueueServiceClient(queueServiceUri, storageCredential, options);
+            }
             return serviceClient.GetQueueClient(settings.DeadLetterQueueName);
         });
 
@@ -78,9 +94,9 @@ var host = new HostBuilder()
         // as tracking/queue — single identity grant covers everything.
         services.AddSingleton(_ =>
         {
-            var blobServiceClient = new BlobServiceClient(
-                new Uri(settings.TrackingStorageAccountUrl),
-                storageCredential);
+            BlobServiceClient blobServiceClient = useConnectionString
+                ? new BlobServiceClient(storageConnectionString)
+                : new BlobServiceClient(new Uri(settings.TrackingStorageAccountUrl), storageCredential);
             return blobServiceClient.GetBlobContainerClient(settings.FailureBlobContainerName);
         });
 
