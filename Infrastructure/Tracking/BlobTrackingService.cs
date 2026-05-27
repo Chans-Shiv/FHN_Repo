@@ -31,9 +31,17 @@ public class BlobTrackingService : ITrackingService
     {
         _logger = logger;
 
+        // Excludes ManagedIdentityCredential locally so we don't pick up an IMDS
+        // identity (from a VM or proxy) that lacks storage RBAC. In Azure the
+        // deployed function still uses its own MI because env vars / VS sign-in
+        // / az CLI aren't available in App Service. Matches the storage credential
+        // chain used in Program.cs for the queue + failure-archive clients.
         var serviceClient = new BlobServiceClient(
             new Uri(settings.TrackingStorageAccountUrl),
-            new DefaultAzureCredential());
+            new DefaultAzureCredential(new DefaultAzureCredentialOptions
+            {
+                ExcludeManagedIdentityCredential = true
+            }));
 
         _container = serviceClient.GetBlobContainerClient(settings.TrackingContainerName);
         _blob = _container.GetBlobClient(settings.TrackingBlobName);

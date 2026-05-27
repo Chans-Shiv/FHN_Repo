@@ -37,6 +37,18 @@ var host = new HostBuilder()
         };
         services.AddSingleton(settings);
 
+        // Excludes ManagedIdentityCredential from the credential chain in local dev so
+        // we don't end up picking a Managed Identity (from an IMDS proxy or developer
+        // VM) that lacks the storage RBAC roles. In Azure this option is harmless —
+        // the deployed function still authenticates via its own Managed Identity
+        // because the other credential sources (env vars, VS sign-in, az CLI) aren't
+        // present in the App Service host. Mirrors what DataverseConnectionFactory
+        // does for the same reason.
+        var storageCredential = new DefaultAzureCredential(new DefaultAzureCredentialOptions
+        {
+            ExcludeManagedIdentityCredential = true
+        });
+
         // Storage Queue client used by QueueDeadLetterService to enqueue failed records.
         // Endpoint is derived from TrackingStorageAccountUrl by swapping blob→queue, so
         // tracking blob + dead-letter queue live on the same account (one identity grant).
@@ -57,7 +69,7 @@ var host = new HostBuilder()
             {
                 MessageEncoding = QueueMessageEncoding.Base64
             };
-            var serviceClient = new QueueServiceClient(queueServiceUri, new DefaultAzureCredential(), options);
+            var serviceClient = new QueueServiceClient(queueServiceUri, storageCredential, options);
             return serviceClient.GetQueueClient(settings.DeadLetterQueueName);
         });
 
@@ -68,7 +80,7 @@ var host = new HostBuilder()
         {
             var blobServiceClient = new BlobServiceClient(
                 new Uri(settings.TrackingStorageAccountUrl),
-                new DefaultAzureCredential());
+                storageCredential);
             return blobServiceClient.GetBlobContainerClient(settings.FailureBlobContainerName);
         });
 
