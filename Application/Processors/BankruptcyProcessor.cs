@@ -23,7 +23,7 @@ public class BankruptcyProcessor : BaseModuleProcessor
     protected override string EntityLogicalName => "crbee_dmt_bankaccountcollateralrecordses";
     protected override string MatchColumn => "crbee_dmt_accountnumber";
 
-    private const string LoanIdentifierColumn = "crbee_dmt_loanidentifier";
+    private const string LoanIdentifierColumn = "ff_dmt_loanidentifier";
 
     public BankruptcyProcessor(
         IDataverseRepository repository,
