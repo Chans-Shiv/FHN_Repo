@@ -2,8 +2,10 @@
   "_comment": "Copy this file to local.settings.json and fill in real values. local.settings.json is gitignored.",
   "IsEncrypted": false,
   "Values": {
-    "_comment_storage": "AzureWebJobsStorage drives both the Functions host's internal storage (timer schedule, queue listener) and our app's queue + blob clients (when the value is a connection string with AccountKey=, Program.cs reuses it; otherwise it falls through to DefaultAzureCredential). For local dev choose ONE: (a) 'UseDevelopmentStorage=true' if running Azurite, or (b) full connection string from the Azure portal → Storage account → Access keys. Do NOT add a separate AzureWebJobsStorage__queueServiceUri / __blobServiceUri key — that conflicts with the connection-string form.",
-    "AzureWebJobsStorage": "DefaultEndpointsProtocol=https;AccountName=YOUR_STORAGE;AccountKey=YOUR_KEY;EndpointSuffix=core.windows.net",
+    "_comment_storage": "Identity-only storage auth. Set the two __serviceUri keys (not a connection string) and grant your local AAD user 'Storage Blob Data Contributor' + 'Storage Queue Data Contributor' on the account; the Functions host hits storage via DefaultAzureCredential. In Azure these come from the Function App's Managed Identity. AZURE_FUNCTIONS_ENVIRONMENT=Development tells our client wiring to skip the IMDS probe locally.",
+    "AzureWebJobsStorage__blobServiceUri": "https://YOUR_STORAGE.blob.core.windows.net",
+    "AzureWebJobsStorage__queueServiceUri": "https://YOUR_STORAGE.queue.core.windows.net",
+    "AZURE_FUNCTIONS_ENVIRONMENT": "Development",
 
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
 
@@ -18,17 +20,17 @@
     "PreWarmParallelism": "10",
     "MaxConsecutiveFailureDays": "3",
 
-    "_comment_tracking": "When AzureWebJobsStorage is a connection string, BlobTrackingService reuses it and TrackingStorageAccountUrl is ignored. When AzureWebJobsStorage uses identity binding (Azure deployment), TrackingStorageAccountUrl is the endpoint hit by DefaultAzureCredential.",
+    "_comment_tracking": "Endpoint hit by DefaultAzureCredential for the tracking blob. Same storage account as the queue + AzureWebJobsStorage so a single identity grant covers everything.",
     "TrackingStorageAccountUrl": "https://YOUR_STORAGE.blob.core.windows.net",
     "TrackingContainerName": "sync-state",
     "TrackingBlobName": "tracking.json",
 
     "ErrorTableEntityName": "crbee_consumercredit_errortable",
 
-    "_comment_deadletter": "Storage Queue buffers failed records before they're written to the Dataverse error table. The QueueTrigger listener for DeadLetterProcessor reads from AzureWebJobsStorage, so the queue must live on the SAME storage account as AzureWebJobsStorage points to.",
+    "_comment_deadletter": "Storage Queue buffers failed records before they're written to the Dataverse error table. The QueueTrigger listener for DeadLetterProcessor reads from AzureWebJobsStorage (identity-bound), so the queue must live on the SAME storage account the __queueServiceUri above points to. DeadLetterMaxAttempts is NOT set here — Program.cs reads extensions.queues.maxDequeueCount from host.json so the two can't drift.",
     "DeadLetterQueueName": "dead-letter-errors",
 
-    "_comment_failureblob": "When all queue retries are exhausted, one blob per record is archived under errors/yyyy/MM/dd/{invocationId}-{key}.json. Same storage account as the queue + AzureWebJobsStorage.",
+    "_comment_failureblob": "When all queue retries are exhausted, one blob per record is archived under errors/yyyy/MM/dd/{invocationId}-{key}.json. Same storage account as the queue.",
     "FailureBlobContainerName": "dead-letter-archive",
 
     "_comment_disable": "Set to 'true' to disable the DeadLetterProcessor QueueTrigger function. Use when the queue doesn't exist yet or storage RBAC is being sorted — a failed listener startup otherwise kills the entire host (incl. the TimerTrigger).",

@@ -8,6 +8,7 @@ using Microsoft.Xrm.Sdk.Query;
 using Polly;
 using Polly.Retry;
 using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 using Fhn.Cdm.DataverseSync.Domain.Models;
 // NOTE: Microsoft.Crm.Sdk.Messages is still needed for WhoAmIRequest in ConnectAsync.
@@ -104,7 +105,7 @@ public class DataverseRepository : IDataverseRepository
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _logger.LogInformation(
             "EventName={EventName} Table={Table} TotalKeys={Keys} Chunks={Chunks} Parallelism={Parallelism} HasFilter={HasFilter}",
-            "PreWarmQueryStarted", entityName, keyValues.Count, chunks.Count,
+            LogEvents.PreWarmQueryStarted, entityName, keyValues.Count, chunks.Count,
             _settings.PreWarmParallelism, additionalFilter != null);
 
         int chunksCompleted = 0;
@@ -147,7 +148,7 @@ public class DataverseRepository : IDataverseRepository
                 var newCompleted = Interlocked.Increment(ref chunksCompleted);
                 _logger.LogInformation(
                     "EventName={EventName} Table={Table} Chunk={Chunk}/{Total} ChunkKeys={ChunkKeys} ChunkMatches={Matches} ChunkMs={ChunkMs} ElapsedSec={Elapsed:F1}",
-                    "PreWarmChunk", entityName, newCompleted, chunks.Count,
+                    LogEvents.PreWarmChunk, entityName, newCompleted, chunks.Count,
                     chunk.Count, chunkMatches, chunkSw.ElapsedMilliseconds, sw.Elapsed.TotalSeconds);
             }
             finally { semaphore.Release(); }
@@ -158,7 +159,7 @@ public class DataverseRepository : IDataverseRepository
         sw.Stop();
         _logger.LogInformation(
             "EventName={EventName} Table={Table} Matched={Matched} OfKeys={Keys} ElapsedSec={Elapsed:F1}",
-            "PreWarmQueryComplete", entityName, result.Count, keyValues.Count, sw.Elapsed.TotalSeconds);
+            LogEvents.PreWarmQueryComplete, entityName, result.Count, keyValues.Count, sw.Elapsed.TotalSeconds);
 
         return new Dictionary<string, Entity>(result, StringComparer.OrdinalIgnoreCase);
     }
@@ -186,7 +187,7 @@ public class DataverseRepository : IDataverseRepository
 
         _logger.LogInformation(
             "EventName={EventName} Entities={Entities} Batches={Batches} Parallelism={Parallelism}",
-            "BatchUpdateStarted", entities.Count, chunks.Count, _settings.MaxParallelBatches);
+            LogEvents.BatchUpdateStarted, entities.Count, chunks.Count, _settings.MaxParallelBatches);
 
         using var semaphore = new SemaphoreSlim(_settings.MaxParallelBatches);
 
@@ -204,7 +205,7 @@ public class DataverseRepository : IDataverseRepository
                 var newCompleted = Interlocked.Increment(ref batchesCompleted);
                 _logger.LogInformation(
                     "EventName={EventName} Batch={Batch}/{Total} Succeeded={Succeeded} Failed={Failed} BatchMs={BatchMs} ElapsedSec={Elapsed:F1}",
-                    "BatchUpdateBatch", newCompleted, chunks.Count, s, f,
+                    LogEvents.BatchUpdateBatch, newCompleted, chunks.Count, s, f,
                     batchSw.ElapsedMilliseconds, sw.Elapsed.TotalSeconds);
             }
             finally { semaphore.Release(); }
@@ -215,7 +216,7 @@ public class DataverseRepository : IDataverseRepository
         sw.Stop();
         _logger.LogInformation(
             "EventName={EventName} Succeeded={Succeeded} Failed={Failed} ElapsedSec={Elapsed:F1}",
-            "BatchUpdateComplete", totalSucceeded, totalFailed, sw.Elapsed.TotalSeconds);
+            LogEvents.BatchUpdateComplete, totalSucceeded, totalFailed, sw.Elapsed.TotalSeconds);
 
         return (totalSucceeded, totalFailed, allFailures);
     }
@@ -231,8 +232,9 @@ public class DataverseRepository : IDataverseRepository
         if (stage1Failed.Count == 0)
             return (stage1Succeeded, 0, new List<FailedRecord>());
 
-        _logger.LogWarning("Stage 1: {Success}/{Total}, {Failed} failures — retrying",
-            stage1Succeeded, chunk.Count, stage1Failed.Count);
+        _logger.LogWarning(
+            "EventName={EventName} Succeeded={Succeeded} Total={Total} Failed={Failed}",
+            LogEvents.BatchRetryStage1, stage1Succeeded, chunk.Count, stage1Failed.Count);
 
         // ── STAGE 2: Retry only the failed entities ──
         await Task.Delay(TimeSpan.FromSeconds(5), ct);
@@ -242,12 +244,16 @@ public class DataverseRepository : IDataverseRepository
 
         if (stage2Failed.Count == 0)
         {
-            _logger.LogInformation("Stage 2: All {Count} retried records recovered", stage2Succeeded);
+            _logger.LogInformation(
+                "EventName={EventName} Recovered={Count}",
+                LogEvents.BatchRetryStage2Recovered, stage2Succeeded);
             return (totalSucceeded, 0, new List<FailedRecord>());
         }
 
         // ── STAGE 3: Dead-letter permanent failures ──
-        _logger.LogWarning("Stage 3: {Count} permanently failed records", stage2Failed.Count);
+        _logger.LogWarning(
+            "EventName={EventName} Failed={Count}",
+            LogEvents.BatchPermanentFailures, stage2Failed.Count);
         return (totalSucceeded, stage2Failed.Count, stage2Failed);
     }
 
@@ -292,7 +298,9 @@ public class DataverseRepository : IDataverseRepository
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Entire batch failed ({Count} records)", entities.Count);
+            _logger.LogError(ex,
+                "EventName={EventName} Count={Count} Error={Error}",
+                LogEvents.BatchSendFailed, entities.Count, ex.Message);
             return (0, entities.Select(e => new FailedRecord
             {
                 Key = ExtractBusinessKey(e),

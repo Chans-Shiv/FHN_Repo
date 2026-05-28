@@ -1,5 +1,7 @@
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Models;
 using Fhn.Cdm.DataverseSync.Infrastructure.DeadLetter;
 
@@ -15,27 +17,26 @@ namespace Fhn.Cdm.DataverseSync.Functions;
 ///     message. Nothing should ever land in the {queue}-poison sibling queue
 ///     because we explicitly handle the give-up case ourselves.
 ///
-/// IMPORTANT: <see cref="MaxAttempts"/> must match <c>host.json</c>'s
-/// <c>extensions.queues.maxDequeueCount</c> (default 5). If host.json raises that
-/// number and this constant stays at 5, we'd archive prematurely on attempt 5
-/// while the runtime keeps retrying.
+/// MaxAttempts comes from <c>extensions.queues.maxDequeueCount</c> in host.json,
+/// read at startup by Program.cs and stored on <see cref="SyncSettings.DeadLetterMaxAttempts"/>.
+/// Single source of truth — see <c>Program.ReadHostJsonMaxDequeueCount</c>.
 /// </summary>
 public class DeadLetterProcessorFunction
 {
-    // Must match host.json extensions.queues.maxDequeueCount.
-    private const int MaxAttempts = 5;
-
     private readonly DataverseErrorTableService _writer;
     private readonly FailureBlobWriter _archive;
+    private readonly int _maxAttempts;
     private readonly ILogger<DeadLetterProcessorFunction> _logger;
 
     public DeadLetterProcessorFunction(
         DataverseErrorTableService writer,
         FailureBlobWriter archive,
+        SyncSettings settings,
         ILogger<DeadLetterProcessorFunction> logger)
     {
         _writer = writer;
         _archive = archive;
+        _maxAttempts = settings.DeadLetterMaxAttempts;
         _logger = logger;
     }
 
@@ -47,7 +48,7 @@ public class DeadLetterProcessorFunction
     {
         _logger.LogInformation(
             "EventName={EventName} Module={Module} MthKey={MthKey} Account={Account} LoanId={LoanId} DequeueCount={DequeueCount}",
-            "DeadLetterDequeued", msg.ModuleName, msg.MthKey,
+            LogEvents.DeadLetterDequeued, msg.ModuleName, msg.MthKey,
             msg.AccountNumber ?? "",
             msg.LoanIdentifier?.ToString() ?? "",
             dequeueCount);
@@ -56,14 +57,14 @@ public class DeadLetterProcessorFunction
         {
             await _writer.WriteOneAsync(msg, ct);
         }
-        catch (Exception ex) when (dequeueCount >= MaxAttempts)
+        catch (Exception ex) when (dequeueCount >= _maxAttempts)
         {
             // Final attempt — persist a durable artifact and ACK the message.
             // Wrapped in its own try/catch so a blob-write failure can't escape
             // and put us in an infinite requeue loop.
             _logger.LogError(ex,
                 "EventName={EventName} Module={Module} MthKey={MthKey} Account={Account} LoanId={LoanId} DequeueCount={DequeueCount} Error={Error}",
-                "DeadLetterGivenUp", msg.ModuleName, msg.MthKey,
+                LogEvents.DeadLetterGivenUp, msg.ModuleName, msg.MthKey,
                 msg.AccountNumber ?? "",
                 msg.LoanIdentifier?.ToString() ?? "",
                 dequeueCount,
@@ -81,7 +82,7 @@ public class DeadLetterProcessorFunction
                 // delivery would loop straight back into this same branch.
                 _logger.LogCritical(archiveEx,
                     "EventName={EventName} Module={Module} MthKey={MthKey} Account={Account} LoanId={LoanId} Key={Key} OriginalError={OriginalError}",
-                    "FailureArchiveWriteFailed", msg.ModuleName, msg.MthKey,
+                    LogEvents.FailureArchiveWriteFailed, msg.ModuleName, msg.MthKey,
                     msg.AccountNumber ?? "",
                     msg.LoanIdentifier?.ToString() ?? "",
                     msg.Key,
@@ -93,7 +94,7 @@ public class DeadLetterProcessorFunction
             // Not the final attempt — log and rethrow so the runtime requeues.
             _logger.LogWarning(ex,
                 "EventName={EventName} Module={Module} MthKey={MthKey} Account={Account} LoanId={LoanId} DequeueCount={DequeueCount} Error={Error}",
-                "ErrorTableWriteFailed", msg.ModuleName, msg.MthKey,
+                LogEvents.ErrorTableWriteFailed, msg.ModuleName, msg.MthKey,
                 msg.AccountNumber ?? "",
                 msg.LoanIdentifier?.ToString() ?? "",
                 dequeueCount,

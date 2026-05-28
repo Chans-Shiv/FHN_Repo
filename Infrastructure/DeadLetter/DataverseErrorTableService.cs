@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Models;
 using Fhn.Cdm.DataverseSync.Infrastructure.Dataverse;
 
@@ -59,7 +60,7 @@ public class DataverseErrorTableService
 
         _logger.LogInformation(
             "EventName={EventName} Module={Module} MthKey={MthKey} Account={Account} LoanId={LoanId} Table={Table}",
-            "ErrorTableWritten", msg.ModuleName, msg.MthKey,
+            LogEvents.ErrorTableWritten, msg.ModuleName, msg.MthKey,
             msg.AccountNumber ?? "",
             msg.LoanIdentifier?.ToString() ?? "",
             _settings.ErrorTableEntityName);

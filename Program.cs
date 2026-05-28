@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Azure.Identity;
 using Azure.Storage.Blobs;
 using Azure.Storage.Queues;
@@ -19,48 +20,45 @@ var host = new HostBuilder()
     .ConfigureServices((context, services) =>
     {
         // ── Configuration ──
+        // Resource-pointing values (connection strings, URLs, container/queue/table
+        // names) are required — GetRequired() throws on missing so a forgotten
+        // setting fails loud at startup instead of silently using a default that
+        // points at the wrong resource. Tuning knobs keep their SyncSettings
+        // defaults and only get overridden when explicitly set.
         var settings = new SyncSettings
         {
             SqlConnectionString = GetRequired("SqlConnectionString"),
             DataverseUrl = GetRequired("DataverseUrl"),
-            SqlBatchSize = TryParseInt("SqlBatchSize", 10_000),
-            DataverseBatchSize = TryParseInt("DataverseBatchSize", 1_000),
-            MaxParallelBatches = TryParseInt("MaxParallelBatches", 5),
-            PreWarmParallelism = TryParseInt("PreWarmParallelism", 10),
-            MaxConsecutiveFailureDays = TryParseInt("MaxConsecutiveFailureDays", 3),
             TrackingStorageAccountUrl = GetRequired("TrackingStorageAccountUrl"),
-            TrackingContainerName = Environment.GetEnvironmentVariable("TrackingContainerName") ?? "sync-state",
-            TrackingBlobName = Environment.GetEnvironmentVariable("TrackingBlobName") ?? "tracking.json",
-            ErrorTableEntityName = Environment.GetEnvironmentVariable("ErrorTableEntityName") ?? "crbee_consumercredit_errortable",
-            DeadLetterQueueName = Environment.GetEnvironmentVariable("DeadLetterQueueName") ?? "dead-letter-errors",
-            FailureBlobContainerName = Environment.GetEnvironmentVariable("FailureBlobContainerName") ?? "dead-letter-archive",
+            TrackingContainerName = GetRequired("TrackingContainerName"),
+            TrackingBlobName = GetRequired("TrackingBlobName"),
+            ErrorTableEntityName = GetRequired("ErrorTableEntityName"),
+            DeadLetterQueueName = GetRequired("DeadLetterQueueName"),
+            FailureBlobContainerName = GetRequired("FailureBlobContainerName"),
+            // Pulled from host.json below — see ReadHostJsonMaxDequeueCount.
+            DeadLetterMaxAttempts = ReadHostJsonMaxDequeueCount(),
         };
+        OverrideInt("SqlBatchSize", v => settings.SqlBatchSize = v);
+        OverrideInt("DataverseBatchSize", v => settings.DataverseBatchSize = v);
+        OverrideInt("MaxParallelBatches", v => settings.MaxParallelBatches = v);
+        OverrideInt("PreWarmParallelism", v => settings.PreWarmParallelism = v);
+        OverrideInt("MaxConsecutiveFailureDays", v => settings.MaxConsecutiveFailureDays = v);
         services.AddSingleton(settings);
 
-        // Local dev escape hatch: if AzureWebJobsStorage is a connection string
-        // (typical local-dev setup), reuse it for our queue + blob clients so
-        // local runs don't depend on per-user RBAC grants — same identity story
-        // as the Functions host itself. In Azure, AzureWebJobsStorage uses
-        // identity-binding (no connection string) so we fall through to
-        // DefaultAzureCredential, where the deployed function's Managed Identity
-        // picks up the storage roles. ManagedIdentityCredential is excluded so
-        // local dev doesn't accidentally pick up an IMDS identity (VM / proxy)
-        // that lacks the storage RBAC roles. Mirrors DataverseConnectionFactory.
-        var storageConnectionString = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
-        var useConnectionString =
-            !string.IsNullOrWhiteSpace(storageConnectionString)
-            && storageConnectionString.Contains("AccountKey=", StringComparison.OrdinalIgnoreCase);
-
+        // Identity-only storage auth. In Azure the deployed function's Managed
+        // Identity picks up the storage roles; locally `az login` / VS sign-in
+        // supplies the credential. ManagedIdentityCredential is excluded only in
+        // local dev so we don't waste time probing an IMDS endpoint that doesn't
+        // exist on a dev box (and can't accidentally pick up a stray VM/proxy
+        // identity that lacks the storage RBAC roles).
         var storageCredential = new DefaultAzureCredential(new DefaultAzureCredentialOptions
         {
-            ExcludeManagedIdentityCredential = true
+            ExcludeManagedIdentityCredential = IsLocalDev()
         });
 
         // Storage Queue client used by QueueDeadLetterService to enqueue failed records.
         // Endpoint is derived from TrackingStorageAccountUrl by swapping blob→queue, so
         // tracking blob + dead-letter queue live on the same account (one identity grant).
-        // The QueueTrigger function reads from the SAME queue via the
-        // AzureWebJobsStorage connection — that must point at this same account.
         //
         // MessageEncoding = Base64: the WebJobs QueueTrigger extension expects
         // base64-encoded message bodies by default. Azure.Storage.Queues v12+ ships
@@ -69,23 +67,13 @@ var host = new HostBuilder()
         // delivery attempts. Setting Base64 here makes the producer match the trigger.
         services.AddSingleton(_ =>
         {
-            var options = new QueueClientOptions
-            {
-                MessageEncoding = QueueMessageEncoding.Base64
-            };
-
-            QueueServiceClient serviceClient;
-            if (useConnectionString)
-            {
-                serviceClient = new QueueServiceClient(storageConnectionString, options);
-            }
-            else
-            {
-                var queueServiceUri = new Uri(
-                    settings.TrackingStorageAccountUrl
-                        .Replace(".blob.core.windows.net", ".queue.core.windows.net"));
-                serviceClient = new QueueServiceClient(queueServiceUri, storageCredential, options);
-            }
+            var queueServiceUri = new Uri(
+                settings.TrackingStorageAccountUrl
+                    .Replace(".blob.core.windows.net", ".queue.core.windows.net"));
+            var serviceClient = new QueueServiceClient(
+                queueServiceUri,
+                storageCredential,
+                new QueueClientOptions { MessageEncoding = QueueMessageEncoding.Base64 });
             return serviceClient.GetQueueClient(settings.DeadLetterQueueName);
         });
 
@@ -94,9 +82,8 @@ var host = new HostBuilder()
         // as tracking/queue — single identity grant covers everything.
         services.AddSingleton(_ =>
         {
-            BlobServiceClient blobServiceClient = useConnectionString
-                ? new BlobServiceClient(storageConnectionString)
-                : new BlobServiceClient(new Uri(settings.TrackingStorageAccountUrl), storageCredential);
+            var blobServiceClient = new BlobServiceClient(
+                new Uri(settings.TrackingStorageAccountUrl), storageCredential);
             return blobServiceClient.GetBlobContainerClient(settings.FailureBlobContainerName);
         });
 
@@ -155,5 +142,40 @@ static string GetRequired(string key) =>
     Environment.GetEnvironmentVariable(key)
     ?? throw new InvalidOperationException($"Missing required setting: '{key}'");
 
-static int TryParseInt(string key, int defaultValue) =>
-    int.TryParse(Environment.GetEnvironmentVariable(key), out var v) ? v : defaultValue;
+// Optional tuning overrides — only invoke the assignment when the env var is
+// set, so the property initializer in SyncSettings remains the source of truth
+// for the default value.
+static void OverrideInt(string key, Action<int> assign)
+{
+    if (int.TryParse(Environment.GetEnvironmentVariable(key), out var v)) assign(v);
+}
+
+// Core Tools sets AZURE_FUNCTIONS_ENVIRONMENT=Development for `func start`; the
+// deployed Function App leaves it unset (or set to Production), so this cleanly
+// separates the two without inspecting connection-string shape.
+static bool IsLocalDev() =>
+    string.Equals(
+        Environment.GetEnvironmentVariable("AZURE_FUNCTIONS_ENVIRONMENT"),
+        "Development",
+        StringComparison.OrdinalIgnoreCase);
+
+// Reads extensions.queues.maxDequeueCount from host.json so DeadLetterMaxAttempts
+// is sourced from the same file the Functions runtime uses — no chance for the
+// two to drift. Falls back to 5 (the Functions runtime's own default) only when
+// host.json doesn't specify the key.
+static int ReadHostJsonMaxDequeueCount()
+{
+    const int RuntimeDefault = 5;
+    var path = Path.Combine(AppContext.BaseDirectory, "host.json");
+    if (!File.Exists(path)) return RuntimeDefault;
+
+    using var doc = JsonDocument.Parse(File.ReadAllText(path));
+    if (doc.RootElement.TryGetProperty("extensions", out var ext)
+        && ext.TryGetProperty("queues", out var queues)
+        && queues.TryGetProperty("maxDequeueCount", out var max)
+        && max.TryGetInt32(out var value))
+    {
+        return value;
+    }
+    return RuntimeDefault;
+}

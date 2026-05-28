@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Logging;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Models;
 
 namespace Fhn.Cdm.DataverseSync.Infrastructure.DeadLetter;
@@ -25,7 +26,8 @@ public class FailureBlobWriter
 
     private readonly BlobContainerClient _container;
     private readonly ILogger<FailureBlobWriter> _logger;
-    private int _containerEnsured;
+    private readonly SemaphoreSlim _ensureLock = new(1, 1);
+    private bool _containerEnsured;
 
     public FailureBlobWriter(BlobContainerClient container, ILogger<FailureBlobWriter> logger)
     {
@@ -35,14 +37,14 @@ public class FailureBlobWriter
 
     public async Task WriteAsync(DeadLetterMessage msg, Exception giveUpError, CancellationToken ct)
     {
-        if (Interlocked.Exchange(ref _containerEnsured, 1) == 0)
-            await _container.CreateIfNotExistsAsync(cancellationToken: ct);
+        await EnsureContainerAsync(ct);
 
         var now = DateTimeOffset.UtcNow;
         var blobName = $"errors/{now:yyyy}/{now:MM}/{now:dd}/{msg.InvocationId}-{msg.Key}.json";
 
         // Wrap the message with the final exception details so the archived blob
-        // is self-contained for operator triage.
+        // is self-contained for operator triage. ToString() carries the full stack
+        // + AggregateException inner exceptions; .Message alone hides the cause.
         var payload = new
         {
             msg.ModuleName,
@@ -54,7 +56,7 @@ public class FailureBlobWriter
             OriginalError = msg.ErrorMessage,
             msg.EnqueuedAt,
             GivenUpAt = now,
-            FinalAttemptError = giveUpError.Message,
+            FinalAttemptError = giveUpError.ToString(),
             ExceptionType = giveUpError.GetType().FullName,
         };
 
@@ -66,6 +68,25 @@ public class FailureBlobWriter
 
         _logger.LogInformation(
             "EventName={EventName} BlobName={BlobName} Module={Module} MthKey={MthKey}",
-            "FailureArchived", blobName, msg.ModuleName, msg.MthKey);
+            LogEvents.FailureArchived, blobName, msg.ModuleName, msg.MthKey);
+    }
+
+    // Only flip _containerEnsured after a successful create — a transient failure
+    // (RBAC propagation, network blip) shouldn't permanently poison subsequent
+    // writes by skipping the create + uploading to a missing container.
+    private async Task EnsureContainerAsync(CancellationToken ct)
+    {
+        if (_containerEnsured) return;
+        await _ensureLock.WaitAsync(ct);
+        try
+        {
+            if (_containerEnsured) return;
+            await _container.CreateIfNotExistsAsync(cancellationToken: ct);
+            _containerEnsured = true;
+        }
+        finally
+        {
+            _ensureLock.Release();
+        }
     }
 }

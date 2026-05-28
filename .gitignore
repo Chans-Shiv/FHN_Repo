@@ -7,6 +7,16 @@
 # If you need a template for new devs, commit a local.settings.example.json instead.
 local.settings.json
 
+# Other common secret-bearing files — committing any of these is almost always
+# a mistake. Cheap insurance even if we don't use them today.
+.env
+.env.*
+!.env.example
+secrets.json
+appsettings.*.local.json
+*.pfx
+*.snk
+
 # Azure Functions Core Tools cache + runtime artifacts
 .azure/
 .azurefunctions/
@@ -57,6 +67,8 @@ PublishScripts/
 *.userprefs
 *.lscache
 *.swp
+*.swo
+*.swn
 
 # ──────────────────────────────────────────────
 # JetBrains Rider / ReSharper
@@ -71,6 +83,7 @@ _ReSharper.*/
 # VS Code (commit selectively if you have shared settings)
 # ──────────────────────────────────────────────
 .vscode/
+.history/
 
 # ──────────────────────────────────────────────
 # Test results / coverage
@@ -93,6 +106,13 @@ coverage/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# ──────────────────────────────────────────────
+# Claude Code (local agent config, not for sharing)
+# ──────────────────────────────────────────────
+.claude/
+CLAUDE.md
+CLAUDE.local.md
 
 # ──────────────────────────────────────────────
 # Logs / temp

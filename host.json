@@ -5,5 +5,8 @@
     "logLevel": { "default": "Information", "Fhn.Cdm.DataverseSync": "Information" }
   },
   "functionTimeout": "04:00:00",
-  "extensions": { "timers": { "isPersistentTimerEnabled": true } }
+  "extensions": {
+    "timers": { "isPersistentTimerEnabled": true },
+    "queues": { "maxDequeueCount": 5 }
+  }
 }

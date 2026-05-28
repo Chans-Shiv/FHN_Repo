@@ -3,6 +3,7 @@ using Azure.Identity;
 using Microsoft.Extensions.Logging;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 
 namespace Fhn.Cdm.DataverseSync.Infrastructure.Dataverse;
 
@@ -12,8 +13,9 @@ namespace Fhn.Cdm.DataverseSync.Infrastructure.Dataverse;
 /// Auth: DefaultAzureCredential
 ///   - Local  → az login / Visual Studio sign-in / azd
 ///   - Azure  → Managed Identity (System-assigned)
-///   Note: ManagedIdentityCredential is excluded so local runs don't waste time
-///   probing the IMDS endpoint that doesn't exist on a dev box.
+///   Note: ManagedIdentityCredential is excluded only in local dev so we don't
+///   probe the IMDS endpoint that doesn't exist on a dev box. In Azure the
+///   deployed Managed Identity is required, so we leave it enabled there.
 ///
 /// Token caching:
 ///   The Dataverse SDK invokes our token-provider lambda on every operation,
@@ -54,9 +56,14 @@ public class DataverseConnectionFactory : IDisposable
         {
             if (_client?.IsReady == true) return Task.FromResult(_client);
 
+            var isLocalDev = string.Equals(
+                Environment.GetEnvironmentVariable("AZURE_FUNCTIONS_ENVIRONMENT"),
+                "Development",
+                StringComparison.OrdinalIgnoreCase);
+
             _credential = new DefaultAzureCredential(new DefaultAzureCredentialOptions
             {
-                ExcludeManagedIdentityCredential = true
+                ExcludeManagedIdentityCredential = isLocalDev
             });
             _scope = _settings.DataverseUrl.TrimEnd('/') + "/.default";
 
@@ -102,14 +109,14 @@ public class DataverseConnectionFactory : IDisposable
 
             _logger.LogInformation(
                 "EventName={EventName} Reason={Reason}",
-                "DataverseTokenRefresh", _cachedToken.HasValue ? "ExpiringSoon" : "Initial");
+                LogEvents.DataverseTokenRefresh, _cachedToken.HasValue ? "ExpiringSoon" : "Initial");
 
             _cachedToken = await _credential!.GetTokenAsync(
                 new TokenRequestContext(new[] { _scope! }), default);
 
             _logger.LogInformation(
                 "EventName={EventName} ExpiresOn={ExpiresOn:o}",
-                "DataverseTokenRefreshed", _cachedToken.Value.ExpiresOn);
+                LogEvents.DataverseTokenRefreshed, _cachedToken.Value.ExpiresOn);
 
             return _cachedToken.Value.Token;
         }

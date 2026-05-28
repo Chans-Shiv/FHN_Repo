@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 
 namespace Fhn.Cdm.DataverseSync.Infrastructure.SqlMi;
@@ -65,13 +66,13 @@ public class SqlMiDataReader : ISqlDataReader
             if (rowCount % 25_000 == 0)
                 _logger.LogInformation(
                     "EventName={EventName} Rows={Rows} ElapsedSec={Elapsed:F1}",
-                    "SqlKeyStreamProgress", rowCount, sw.Elapsed.TotalSeconds);
+                    LogEvents.SqlKeyStreamProgress, rowCount, sw.Elapsed.TotalSeconds);
         }
 
         sw.Stop();
         _logger.LogInformation(
             "EventName={EventName} Rows={Rows} ElapsedSec={Elapsed:F1}",
-            "SqlKeyStreamComplete", rowCount, sw.Elapsed.TotalSeconds);
+            LogEvents.SqlKeyStreamComplete, rowCount, sw.Elapsed.TotalSeconds);
     }
 
     public async IAsyncEnumerable<List<Dictionary<string, object?>>> StreamBatchesAsync(
@@ -114,8 +115,9 @@ public class SqlMiDataReader : ISqlDataReader
 
             if (batch.Count >= batchSize)
             {
-                _logger.LogInformation("SQL: Yielding batch of {Count} rows (total: {Total})",
-                    batch.Count, totalRows);
+                _logger.LogInformation(
+                    "EventName={EventName} BatchRows={Count} TotalRows={Total} IsFinal={IsFinal}",
+                    LogEvents.SqlBatchYielded, batch.Count, totalRows, false);
                 yield return batch;
                 batch = new List<Dictionary<string, object?>>(batchSize);
             }
@@ -123,11 +125,14 @@ public class SqlMiDataReader : ISqlDataReader
 
         if (batch.Count > 0)
         {
-            _logger.LogInformation("SQL: Yielding final batch of {Count} rows (total: {Total})",
-                batch.Count, totalRows);
+            _logger.LogInformation(
+                "EventName={EventName} BatchRows={Count} TotalRows={Total} IsFinal={IsFinal}",
+                LogEvents.SqlBatchYielded, batch.Count, totalRows, true);
             yield return batch;
         }
 
-        _logger.LogInformation("SQL: Streaming complete. Total rows: {Total}", totalRows);
+        _logger.LogInformation(
+            "EventName={EventName} TotalRows={Total}",
+            LogEvents.SqlBatchStreamComplete, totalRows);
     }
 }

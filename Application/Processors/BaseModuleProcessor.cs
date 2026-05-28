@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
 using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Entities;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 using Fhn.Cdm.DataverseSync.Domain.Models;
@@ -88,7 +89,7 @@ public abstract class BaseModuleProcessor : IModuleProcessor
 
         Logger.LogInformation(
             "EventName={EventName} Module={Module} Table={Table} Keys={Count} HasFilter={HasFilter}",
-            "PreWarmStarted", ModuleName, EntityLogicalName, keys.Count, GetPreWarmFilter() != null);
+            LogEvents.PreWarmStarted, ModuleName, EntityLogicalName, keys.Count, GetPreWarmFilter() != null);
 
         LookupDict = await Repository.QueryByKeysAsync(
             EntityLogicalName,
@@ -100,7 +101,7 @@ public abstract class BaseModuleProcessor : IModuleProcessor
 
         Logger.LogInformation(
             "EventName={EventName} Module={Module} Table={Table} Matched={Matched} OfKeys={Keys}",
-            "PreWarmComplete", ModuleName, EntityLogicalName, LookupDict.Count, keys.Count);
+            LogEvents.PreWarmComplete, ModuleName, EntityLogicalName, LookupDict.Count, keys.Count);
 
         return result;
     }
@@ -177,8 +178,8 @@ public abstract class BaseModuleProcessor : IModuleProcessor
         }
 
         Logger.LogInformation(
-            "[{Module}] Batch: {Updated} updated, {Failed} failed, {Skipped} skipped",
-            ModuleName, result.RowsUpdated, result.RowsFailed, result.RowsSkipped);
+            "EventName={EventName} Module={Module} Updated={Updated} Failed={Failed} Skipped={Skipped}",
+            LogEvents.ModuleBatchComplete, ModuleName, result.RowsUpdated, result.RowsFailed, result.RowsSkipped);
 
         return result;
     }

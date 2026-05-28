@@ -2,6 +2,7 @@ using System.Text.Json;
 using Azure.Storage.Queues;
 using Microsoft.Extensions.Logging;
 using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 using Fhn.Cdm.DataverseSync.Domain.Models;
 
@@ -77,7 +78,7 @@ public class QueueDeadLetterService : IDeadLetterService
 
                 _logger.LogInformation(
                     "EventName={EventName} Module={Module} MthKey={MthKey} Account={Account} LoanId={LoanId} InvocationId={InvocationId}",
-                    "DeadLetterEnqueued", moduleName, mthKey,
+                    LogEvents.DeadLetterEnqueued, moduleName, mthKey,
                     msg.AccountNumber ?? "",
                     msg.LoanIdentifier?.ToString() ?? "",
                     invocationId);
@@ -91,7 +92,7 @@ public class QueueDeadLetterService : IDeadLetterService
                 // boundary at which durability gives up.
                 _logger.LogError(ex,
                     "EventName={EventName} Module={Module} Account={Account} LoanId={LoanId} Key={Key} Error={Error}",
-                    "DeadLetterEnqueueFailed", moduleName,
+                    LogEvents.DeadLetterEnqueueFailed, moduleName,
                     msg.AccountNumber ?? "",
                     msg.LoanIdentifier?.ToString() ?? "",
                     msg.Key,
@@ -101,6 +102,6 @@ public class QueueDeadLetterService : IDeadLetterService
 
         _logger.LogInformation(
             "EventName={EventName} Module={Module} Total={Total} Enqueued={Enqueued} Errored={Errored}",
-            "DeadLetterBatchEnqueued", moduleName, failures.Count, enqueued, errored);
+            LogEvents.DeadLetterBatchEnqueued, moduleName, failures.Count, enqueued, errored);
     }
 }

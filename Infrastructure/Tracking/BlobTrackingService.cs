@@ -6,6 +6,7 @@ using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Logging;
 using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 using Fhn.Cdm.DataverseSync.Domain.Models;
 
@@ -31,23 +32,20 @@ public class BlobTrackingService : ITrackingService
     {
         _logger = logger;
 
-        // Local dev escape hatch: if AzureWebJobsStorage is a connection string,
-        // reuse it so local runs don't depend on per-user RBAC. In Azure (no
-        // connection string) we fall through to DefaultAzureCredential with
-        // ManagedIdentityCredential excluded — same pattern as Program.cs.
-        var storageConnectionString = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
-        var useConnectionString =
-            !string.IsNullOrWhiteSpace(storageConnectionString)
-            && storageConnectionString.Contains("AccountKey=", StringComparison.OrdinalIgnoreCase);
+        // Identity-only auth (Managed Identity in Azure, `az login` locally).
+        // ManagedIdentityCredential is excluded only in local dev so we don't
+        // probe an IMDS endpoint that doesn't exist on a dev box.
+        var isLocalDev = string.Equals(
+            Environment.GetEnvironmentVariable("AZURE_FUNCTIONS_ENVIRONMENT"),
+            "Development",
+            StringComparison.OrdinalIgnoreCase);
 
-        var serviceClient = useConnectionString
-            ? new BlobServiceClient(storageConnectionString)
-            : new BlobServiceClient(
-                new Uri(settings.TrackingStorageAccountUrl),
-                new DefaultAzureCredential(new DefaultAzureCredentialOptions
-                {
-                    ExcludeManagedIdentityCredential = true
-                }));
+        var serviceClient = new BlobServiceClient(
+            new Uri(settings.TrackingStorageAccountUrl),
+            new DefaultAzureCredential(new DefaultAzureCredentialOptions
+            {
+                ExcludeManagedIdentityCredential = isLocalDev
+            }));
 
         _container = serviceClient.GetBlobContainerClient(settings.TrackingContainerName);
         _blob = _container.GetBlobClient(settings.TrackingBlobName);
@@ -100,7 +98,7 @@ public class BlobTrackingService : ITrackingService
         {
             _logger.LogWarning(
                 "EventName={EventName} Status={Status} — concurrent writer detected; forcing overwrite",
-                "TrackingConcurrencyConflict", ex.Status);
+                LogEvents.TrackingConcurrencyConflict, ex.Status);
 
             using var stream = new MemoryStream(bytes);
             var response = await _blob.UploadAsync(stream,

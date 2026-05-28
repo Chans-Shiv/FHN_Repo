@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Fhn.Cdm.DataverseSync.Application;
 using Fhn.Cdm.DataverseSync.Application.Transformations;
 using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 using Fhn.Cdm.DataverseSync.Domain.Models;
 
@@ -64,18 +65,18 @@ public class SyncOrchestrator
         var maxMthKey = MonthKeyCalculator.PreviousMonth(DateTime.UtcNow);
         _logger.LogInformation(
             "EventName={EventName} MaxMthKey={MaxMthKey} Now={NowUtc:o}",
-            "Phase1Started", maxMthKey, DateTime.UtcNow);
+            LogEvents.Phase1Started, maxMthKey, DateTime.UtcNow);
 
         var sqlRowCount = await _sqlReader.GetRowCountForMthKeyAsync(maxMthKey, ct);
         _logger.LogInformation(
             "EventName={EventName} MaxMthKey={MaxMthKey} SqlRowCount={SqlRowCount}",
-            "Phase1SqlRowCount", maxMthKey, sqlRowCount);
+            LogEvents.Phase1SqlRowCount, maxMthKey, sqlRowCount);
 
         if (sqlRowCount == 0)
         {
             _logger.LogInformation(
                 "EventName={EventName} MaxMthKey={MaxMthKey} Reason=NoRows",
-                "Phase1Exit", maxMthKey);
+                LogEvents.Phase1Exit, maxMthKey);
             result.MthKey = maxMthKey;
             result.Duration = sw.Elapsed;
             return result;
@@ -133,7 +134,7 @@ public class SyncOrchestrator
         {
             _logger.LogWarning(
                 "EventName={EventName} SkippedCount={Count} Modules={Modules}",
-                "AbandonedModuleSkipped", abandonedModules.Count, string.Join(",", abandonedModules));
+                LogEvents.AbandonedModuleSkipped, abandonedModules.Count, string.Join(",", abandonedModules));
             foreach (var name in abandonedModules)
                 result.Errors.Add($"[{name}] Skipped — abandoned at {trackingState.Modules[name].AbandonedAt:o}");
         }
@@ -142,7 +143,7 @@ public class SyncOrchestrator
         {
             _logger.LogInformation(
                 "EventName={EventName} Month={Month} SkippedCount={Count} Modules={Modules}",
-                "ModulesAlreadyCompleted", currentMonthStr, completedModules.Count,
+                LogEvents.ModulesAlreadyCompleted, currentMonthStr, completedModules.Count,
                 string.Join(",", completedModules));
         }
 
@@ -150,7 +151,7 @@ public class SyncOrchestrator
         {
             _logger.LogInformation(
                 "EventName={EventName} Month={Month} SqlRowCount={SqlRowCount}",
-                "NothingToProcess", currentMonthStr, sqlRowCount);
+                LogEvents.NothingToProcess, currentMonthStr, sqlRowCount);
             result.MthKey = maxMthKey;
             result.Duration = sw.Elapsed;
             return result;
@@ -158,7 +159,7 @@ public class SyncOrchestrator
 
         _logger.LogInformation(
             "EventName={EventName} Month={Month} SqlRowCount={SqlRowCount} PendingModules={Pending}",
-            "WorkPending", currentMonthStr, sqlRowCount,
+            LogEvents.WorkPending, currentMonthStr, sqlRowCount,
             string.Join(",", pendingProcessors.Select(p => p.ModuleName)));
 
         result.MthKey = maxMthKey;
@@ -181,7 +182,7 @@ public class SyncOrchestrator
         var phase2Sw = Stopwatch.StartNew();
         _logger.LogInformation(
             "EventName={EventName} MaxMthKey={MaxMthKey}",
-            "Phase2KeysStarted", maxMthKey);
+            LogEvents.Phase2KeysStarted, maxMthKey);
 
         var matchKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         await foreach (var raw in _sqlReader.StreamAccountNumbersAsync(maxMthKey, ct))
@@ -194,7 +195,7 @@ public class SyncOrchestrator
         phase2Sw.Stop();
         _logger.LogInformation(
             "EventName={EventName} UniqueKeys={Keys} ElapsedSec={Elapsed:F1}",
-            "Phase2KeysComplete", matchKeys.Count, phase2Sw.Elapsed.TotalSeconds);
+            LogEvents.Phase2KeysComplete, matchKeys.Count, phase2Sw.Elapsed.TotalSeconds);
 
         // ═══════════════════════════════════════════════
         // PHASE 3: Pre-warm module lookup dictionaries (parallel)
@@ -205,7 +206,7 @@ public class SyncOrchestrator
         // ═══════════════════════════════════════════════
         _logger.LogInformation(
             "EventName={EventName} PendingProcessors={Count}",
-            "Phase3Started", pendingProcessors.Count);
+            LogEvents.Phase3Started, pendingProcessors.Count);
 
         // Pre-warm tasks fan out per module. Each task captures its own success/failure
         // so we can fail-fast below — without this guard, a pre-warm auth failure
@@ -237,7 +238,7 @@ public class SyncOrchestrator
         {
             _logger.LogCritical(
                 "EventName={EventName} FailedModules={Modules} Action=AbortSync",
-                "PreWarmAborted", string.Join(",", preWarmFailed));
+                LogEvents.PreWarmAborted, string.Join(",", preWarmFailed));
 
             result.Duration = sw.Elapsed;
             return result;
@@ -245,7 +246,7 @@ public class SyncOrchestrator
 
         _logger.LogInformation(
             "EventName={EventName} ActiveProcessors={Count}",
-            "Phase3Complete", pendingProcessors.Count);
+            LogEvents.Phase3Complete, pendingProcessors.Count);
 
         // ═══════════════════════════════════════════════
         // PHASE 4: Stream SQL → run module processors per batch
@@ -253,7 +254,7 @@ public class SyncOrchestrator
         var phase4Sw = Stopwatch.StartNew();
         _logger.LogInformation(
             "EventName={EventName} ActiveProcessors={ModuleCount} SqlBatchSize={SqlBatchSize}",
-            "Phase4Started", pendingProcessors.Count, _settings.SqlBatchSize);
+            LogEvents.Phase4Started, pendingProcessors.Count, _settings.SqlBatchSize);
 
         var (moduleResults, totalRowsRead) = await ExecuteModulesTrackAsync(maxMthKey, pendingProcessors, ct);
 
@@ -271,7 +272,7 @@ public class SyncOrchestrator
         phase4Sw.Stop();
         _logger.LogInformation(
             "EventName={EventName} ElapsedSec={Elapsed:F1}",
-            "Phase4Complete", phase4Sw.Elapsed.TotalSeconds);
+            LogEvents.Phase4Complete, phase4Sw.Elapsed.TotalSeconds);
 
         // Correlation id for error-table rows. Activity.Current.RootId carries the
         // Functions invocation id (set by the worker host), giving us a join key
@@ -332,7 +333,7 @@ public class SyncOrchestrator
         {
             _logger.LogInformation(
                 "EventName={EventName} ActiveProcessors={Count}",
-                "ModulesTrackStarted", activeProcessors.Count);
+                LogEvents.ModulesTrackStarted, activeProcessors.Count);
 
             int batchNum = 0;
             await foreach (var sqlBatch in _sqlReader.StreamBatchesAsync(maxMthKey, _settings.SqlBatchSize, ct))
@@ -382,21 +383,21 @@ public class SyncOrchestrator
                 batchSw.Stop();
                 _logger.LogInformation(
                     "EventName={EventName} Batch={Batch} BatchRows={Rows} BatchSec={BatchSec:F1} TrackElapsedSec={Elapsed:F1}",
-                    "ModulesBatchComplete", batchNum, transformed.Count,
+                    LogEvents.ModulesBatchComplete, batchNum, transformed.Count,
                     batchSw.Elapsed.TotalSeconds, sw.Elapsed.TotalSeconds);
             }
 
             sw.Stop();
             _logger.LogInformation(
                 "EventName={EventName} Batches={Batches} Modules={Modules} TotalRowsRead={Rows} ElapsedSec={Elapsed:F1}",
-                "ModulesTrackComplete", batchNum, results.Count, totalRowsRead, sw.Elapsed.TotalSeconds);
+                LogEvents.ModulesTrackComplete, batchNum, results.Count, totalRowsRead, sw.Elapsed.TotalSeconds);
         }
         catch (Exception ex)
         {
             sw.Stop();
             _logger.LogError(ex,
                 "EventName={EventName} RowsReadSoFar={Rows} ElapsedSec={Elapsed:F1}",
-                "ModulesTrackFailed", totalRowsRead, sw.Elapsed.TotalSeconds);
+                LogEvents.ModulesTrackFailed, totalRowsRead, sw.Elapsed.TotalSeconds);
         }
 
         return (results, totalRowsRead);
@@ -461,7 +462,7 @@ public class SyncOrchestrator
                 next.LastCompletedSqlRowCount = sqlRowCount;
                 _logger.LogInformation(
                     "EventName={EventName} Module={Module} Month={Month} SqlRowCount={SqlRowCount} Updated={Updated}",
-                    "ModuleCompleted", moduleResult.ModuleName, currentMonth, sqlRowCount, moduleResult.RowsUpdated);
+                    LogEvents.ModuleCompleted, moduleResult.ModuleName, currentMonth, sqlRowCount, moduleResult.RowsUpdated);
             }
             else
             {
@@ -472,7 +473,7 @@ public class SyncOrchestrator
 
                 _logger.LogWarning(
                     "EventName={EventName} Module={Module} RowsProcessed={Processed} RowsSkipped={Skipped} ExpectedSqlRowCount={Expected}",
-                    "ModuleIncompleteStream", moduleResult.ModuleName,
+                    LogEvents.ModuleIncompleteStream, moduleResult.ModuleName,
                     moduleResult.RowsProcessed, moduleResult.RowsSkipped, sqlRowCount);
             }
             return next;
@@ -506,7 +507,7 @@ public class SyncOrchestrator
             next.AbandonedAt = DateTime.UtcNow;
             _logger.LogCritical(
                 "EventName={EventName} Module={Module} ConsecutiveDays={Days} FailedCount={Count} Hash={Hash}",
-                "ModuleAbandoned", moduleResult.ModuleName, next.ConsecutiveFailureDays,
+                LogEvents.ModuleAbandoned, moduleResult.ModuleName, next.ConsecutiveFailureDays,
                 failedKeys.Count, hash);
         }
 
