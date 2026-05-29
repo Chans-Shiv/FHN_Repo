@@ -2,10 +2,11 @@ using System.Data;
 using System.Runtime.CompilerServices;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 
-namespace SqlToDataverseSync.Infrastructure.SqlMi;
+namespace Fhn.Cdm.DataverseSync.Infrastructure.SqlMi;
 
 public class SqlMiDataReader : ISqlDataReader
 {
@@ -16,20 +17,6 @@ public class SqlMiDataReader : ISqlDataReader
     {
         _settings = settings;
         _logger = logger;
-    }
-
-    public async Task<int> GetMaxMthKeyAsync(CancellationToken ct = default)
-    {
-        await using var conn = new SqlConnection(_settings.SqlConnectionString);
-        await conn.OpenAsync(ct);
-        await using var cmd = new SqlCommand(
-            "SELECT Max(MTH_KEY) FROM dbo.ConsumerCreditDataAcq", conn)
-        { CommandTimeout = 30 };
-
-        var result = await cmd.ExecuteScalarAsync(ct);
-        var mthKey = result is not null && result != DBNull.Value ? Convert.ToInt32(result) : 0;
-        _logger.LogInformation("Max MTH_KEY in SQL: {MthKey}", mthKey);
-        return mthKey;
     }
 
     public async Task<long> GetRowCountForMthKeyAsync(int mthKey, CancellationToken ct = default)
@@ -45,6 +32,47 @@ public class SqlMiDataReader : ISqlDataReader
         var count = result is not null ? Convert.ToInt64(result) : 0;
         _logger.LogInformation("Row count for MTH_KEY={MthKey}: {Count}", mthKey, count);
         return count;
+    }
+
+    public async IAsyncEnumerable<string> StreamAccountNumbersAsync(
+        int mthKey,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        // Lightweight projection — single column, no ORDER BY — so the key-collection
+        // pass before pre-warm is much cheaper than the full StreamBatchesAsync.
+        await using var connection = new SqlConnection(_settings.SqlConnectionString);
+        await connection.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(
+            "SELECT ACCT_NUM FROM dbo.ConsumerCreditDataAcq WHERE MTH_KEY = @MthKey",
+            connection)
+        { CommandTimeout = 600 };
+        cmd.Parameters.AddWithValue("@MthKey", mthKey);
+
+        await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess, ct);
+
+        long rowCount = 0;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (await reader.ReadAsync(ct))
+        {
+            if (reader.IsDBNull(0)) continue;
+            var raw = reader.GetValue(0)?.ToString();
+            if (string.IsNullOrEmpty(raw)) continue;
+
+            rowCount++;
+            yield return raw;
+
+            // Heartbeat every 25K rows so the operator sees progress on big tables.
+            if (rowCount % 25_000 == 0)
+                _logger.LogInformation(
+                    "EventName={EventName} Rows={Rows} ElapsedSec={Elapsed:F1}",
+                    LogEvents.SqlKeyStreamProgress, rowCount, sw.Elapsed.TotalSeconds);
+        }
+
+        sw.Stop();
+        _logger.LogInformation(
+            "EventName={EventName} Rows={Rows} ElapsedSec={Elapsed:F1}",
+            LogEvents.SqlKeyStreamComplete, rowCount, sw.Elapsed.TotalSeconds);
     }
 
     public async IAsyncEnumerable<List<Dictionary<string, object?>>> StreamBatchesAsync(
@@ -87,8 +115,9 @@ public class SqlMiDataReader : ISqlDataReader
 
             if (batch.Count >= batchSize)
             {
-                _logger.LogInformation("SQL: Yielding batch of {Count} rows (total: {Total})",
-                    batch.Count, totalRows);
+                _logger.LogInformation(
+                    "EventName={EventName} BatchRows={Count} TotalRows={Total} IsFinal={IsFinal}",
+                    LogEvents.SqlBatchYielded, batch.Count, totalRows, false);
                 yield return batch;
                 batch = new List<Dictionary<string, object?>>(batchSize);
             }
@@ -96,11 +125,14 @@ public class SqlMiDataReader : ISqlDataReader
 
         if (batch.Count > 0)
         {
-            _logger.LogInformation("SQL: Yielding final batch of {Count} rows (total: {Total})",
-                batch.Count, totalRows);
+            _logger.LogInformation(
+                "EventName={EventName} BatchRows={Count} TotalRows={Total} IsFinal={IsFinal}",
+                LogEvents.SqlBatchYielded, batch.Count, totalRows, true);
             yield return batch;
         }
 
-        _logger.LogInformation("SQL: Streaming complete. Total rows: {Total}", totalRows);
+        _logger.LogInformation(
+            "EventName={EventName} TotalRows={Total}",
+            LogEvents.SqlBatchStreamComplete, totalRows);
     }
 }

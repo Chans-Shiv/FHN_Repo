@@ -5,11 +5,12 @@ using Azure.Identity;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Logging;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Interfaces;
-using SqlToDataverseSync.Domain.Models;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Domain.Models;
 
-namespace SqlToDataverseSync.Infrastructure.Tracking;
+namespace Fhn.Cdm.DataverseSync.Infrastructure.Tracking;
 
 /// <summary>
 /// Persists sync tracking state as a single JSON blob in Azure Storage.
@@ -31,9 +32,20 @@ public class BlobTrackingService : ITrackingService
     {
         _logger = logger;
 
+        // Identity-only auth (Managed Identity in Azure, `az login` locally).
+        // ManagedIdentityCredential is excluded only in local dev so we don't
+        // probe an IMDS endpoint that doesn't exist on a dev box.
+        var isLocalDev = string.Equals(
+            Environment.GetEnvironmentVariable("AZURE_FUNCTIONS_ENVIRONMENT"),
+            "Development",
+            StringComparison.OrdinalIgnoreCase);
+
         var serviceClient = new BlobServiceClient(
             new Uri(settings.TrackingStorageAccountUrl),
-            new DefaultAzureCredential());
+            new DefaultAzureCredential(new DefaultAzureCredentialOptions
+            {
+                ExcludeManagedIdentityCredential = isLocalDev
+            }));
 
         _container = serviceClient.GetBlobContainerClient(settings.TrackingContainerName);
         _blob = _container.GetBlobClient(settings.TrackingBlobName);
@@ -86,7 +98,7 @@ public class BlobTrackingService : ITrackingService
         {
             _logger.LogWarning(
                 "EventName={EventName} Status={Status} — concurrent writer detected; forcing overwrite",
-                "TrackingConcurrencyConflict", ex.Status);
+                LogEvents.TrackingConcurrencyConflict, ex.Status);
 
             using var stream = new MemoryStream(bytes);
             var response = await _blob.UploadAsync(stream,
@@ -94,7 +106,7 @@ public class BlobTrackingService : ITrackingService
             _lastETag = response.Value.ETag;
         }
 
-        _logger.LogInformation("Tracking state saved: Month={Month}, Staging={Staging}",
-            state.Month, state.StagingLoadedCount);
+        _logger.LogInformation("Tracking state saved: Month={Month}, SqlRowCount={SqlRowCount}",
+            state.Month, state.SqlRowCount);
     }
 }

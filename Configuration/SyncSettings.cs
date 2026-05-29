@@ -1,9 +1,18 @@
-namespace SqlToDataverseSync.Configuration;
+namespace Fhn.Cdm.DataverseSync.Configuration;
 
+/// <summary>
+/// Configuration model populated from environment variables (local.settings.json
+/// locally, App Settings in Azure). Resource-pointing values (connection strings,
+/// URLs, container/queue/table names) are marked <c>required</c> — Program.cs
+/// throws on missing values so a forgotten setting fails loud at startup rather
+/// than silently using a stale default that points at the wrong resource.
+/// Tuning knobs (batch sizes, parallelism, failure thresholds) keep sensible
+/// defaults because the documented values fit most deployments.
+/// </summary>
 public class SyncSettings
 {
-    public string SqlConnectionString { get; set; } = string.Empty;
-    public string DataverseUrl { get; set; } = string.Empty;
+    public required string SqlConnectionString { get; set; }
+    public required string DataverseUrl { get; set; }
 
     /// <summary>Rows buffered from SQL before passing to processors. Default: 10,000.</summary>
     public int SqlBatchSize { get; set; } = 10_000;
@@ -14,15 +23,55 @@ public class SyncSettings
     /// <summary>Concurrent Dataverse batch requests per processor. 5 procs × 5 slots = 25 peak.</summary>
     public int MaxParallelBatches { get; set; } = 5;
 
+    /// <summary>
+    /// Concurrent QueryByKeysAsync chunk requests during module pre-warm.
+    /// Pre-warm chunks the key set (1000 keys per IN-clause) and queries each chunk;
+    /// running them sequentially was the main source of "stuck at Phase 3" stalls.
+    /// </summary>
+    public int PreWarmParallelism { get; set; } = 10;
+
     /// <summary>Maximum consecutive days of same-hash failures before dead-lettering.</summary>
     public int MaxConsecutiveFailureDays { get; set; } = 3;
 
     /// <summary>HTTPS endpoint of the storage account hosting tracking.json (e.g., https://acct.blob.core.windows.net).</summary>
-    public string TrackingStorageAccountUrl { get; set; } = string.Empty;
+    public required string TrackingStorageAccountUrl { get; set; }
 
     /// <summary>Container holding the tracking blob. Created on first save if it doesn't exist.</summary>
-    public string TrackingContainerName { get; set; } = "sync-state";
+    public required string TrackingContainerName { get; set; }
 
     /// <summary>Blob name for the serialized TrackingState.</summary>
-    public string TrackingBlobName { get; set; } = "tracking.json";
+    public required string TrackingBlobName { get; set; }
+
+    /// <summary>
+    /// Logical name of the Dataverse error table that receives one row per failed
+    /// staging/module operation. If the insert into this table fails, the writer
+    /// falls back to App Insights structured logging.
+    /// </summary>
+    public required string ErrorTableEntityName { get; set; }
+
+    /// <summary>
+    /// Storage Queue name buffering failed records before they're inserted into the
+    /// Dataverse error table. One message = one failed record. After
+    /// <c>maxDequeueCount</c> attempts (see host.json), the queue trigger writes the
+    /// record to <see cref="FailureBlobContainerName"/> + App Insights and ACKs the
+    /// message — so nothing should ever land in <c>{name}-poison</c>.
+    /// </summary>
+    public required string DeadLetterQueueName { get; set; }
+
+    /// <summary>
+    /// Number of delivery attempts before the dead-letter processor gives up and
+    /// archives the record to <see cref="FailureBlobContainerName"/>. Populated at
+    /// startup from <c>extensions.queues.maxDequeueCount</c> in host.json (default 5
+    /// when host.json doesn't specify it — matching the Functions runtime's own
+    /// default), so the constant can't drift from what the runtime actually uses.
+    /// </summary>
+    public int DeadLetterMaxAttempts { get; set; } = 5;
+
+    /// <summary>
+    /// Blob container holding the date-partitioned archive of records that exhausted
+    /// all queue retries. Layout: <c>errors/yyyy/MM/dd/{invocationId}-{key}.json</c>.
+    /// Records here are the durable "we gave up" artifact; App Insights gets the same
+    /// payload logged as <c>EventName=DeadLetterGivenUp</c>.
+    /// </summary>
+    public required string FailureBlobContainerName { get; set; }
 }

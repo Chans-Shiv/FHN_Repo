@@ -1,24 +1,27 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Xrm.Sdk;
-using SqlToDataverseSync.Configuration;
-using SqlToDataverseSync.Domain.Entities;
-using SqlToDataverseSync.Domain.Interfaces;
-using SqlToDataverseSync.Domain.Models;
+using Microsoft.Xrm.Sdk.Query;
+using Fhn.Cdm.DataverseSync.Configuration;
+using Fhn.Cdm.DataverseSync.Diagnostics;
+using Fhn.Cdm.DataverseSync.Domain.Entities;
+using Fhn.Cdm.DataverseSync.Domain.Interfaces;
+using Fhn.Cdm.DataverseSync.Domain.Models;
 
-namespace SqlToDataverseSync.Application.Processors;
+namespace Fhn.Cdm.DataverseSync.Application.Processors;
 
 /// <summary>
 /// Base class for all module processors.
-/// 
+///
 /// Provides:
 ///   - Pre-warm: query module table upfront → build lookup dictionary
 ///   - ProcessBatch: use lookup to find matches → build updates → batch send
 ///   - Type conversion helpers
-///   
+///
 /// Each module extends this and overrides:
 ///   - EntityLogicalName, MatchColumn, ModuleName, Order
 ///   - GetColumnsToRetrieve()     → which columns to pre-warm
-///   - ShouldUpdate()             → filter condition (e.g., LoanIdentifier is null)
+///   - GetPreWarmFilter()         → optional server-side filter (e.g., LoanIdentifier IS NULL)
+///   - ShouldUpdate()             → client-side guard (kept for safety)
 ///   - BuildUpdateEntity()        → what columns to set on the matched record
 ///   - GetMatchKey()              → extract the key from a ConsumerCreditRecord
 /// </summary>
@@ -62,36 +65,43 @@ public abstract class BaseModuleProcessor : IModuleProcessor
     /// <summary>Builds the update entity with the new column values.</summary>
     protected abstract Entity BuildUpdateEntity(Entity existingEntity, ConsumerCreditRecord record);
 
+    /// <summary>
+    /// Optional server-side filter applied during pre-warm in addition to the IN(key)
+    /// condition. Lets each module narrow the pre-warm result set so we don't bring
+    /// back rows that ShouldUpdate would later reject. Default null means no filter.
+    /// </summary>
+    protected virtual FilterExpression? GetPreWarmFilter() => null;
+
     // ═══════════════════════════════════════════════════
     // Pre-warm: query module table once upfront
+    // ───────────────────────────────────────────────────
+    // Takes a pre-built set of match keys (stripped account numbers) from the orchestrator
+    // rather than the full records list — keeps memory low under the streaming pipeline.
     // ═══════════════════════════════════════════════════
 
     public virtual async Task<ModuleResult> PreWarmAsync(
-        List<ConsumerCreditRecord> allRecords,
+        IReadOnlyCollection<string> matchKeys,
         CancellationToken ct = default)
     {
         var result = new ModuleResult { ModuleName = ModuleName };
 
-        // Extract all unique match keys from the in-memory data
-        var matchKeys = allRecords
-            .Select(GetMatchKey)
-            .Where(k => !string.IsNullOrEmpty(k))
-            .Distinct()
-            .ToList();
+        var keys = matchKeys.Where(k => !string.IsNullOrEmpty(k)).ToList();
 
-        Logger.LogInformation("[{Module}] Pre-warming: querying {Count} unique keys against {Table}",
-            ModuleName, matchKeys.Count, EntityLogicalName);
+        Logger.LogInformation(
+            "EventName={EventName} Module={Module} Table={Table} Keys={Count} HasFilter={HasFilter}",
+            LogEvents.PreWarmStarted, ModuleName, EntityLogicalName, keys.Count, GetPreWarmFilter() != null);
 
-        // Query module table for matching records — server-side filter
         LookupDict = await Repository.QueryByKeysAsync(
             EntityLogicalName,
             MatchColumn,
-            matchKeys,
+            keys,
             GetColumnsToRetrieve(),
-            ct: ct);
+            GetPreWarmFilter(),
+            ct);
 
-        Logger.LogInformation("[{Module}] Pre-warm complete: {Matches}/{Total} keys found in module table",
-            ModuleName, LookupDict.Count, matchKeys.Count);
+        Logger.LogInformation(
+            "EventName={EventName} Module={Module} Table={Table} Matched={Matched} OfKeys={Keys}",
+            LogEvents.PreWarmComplete, ModuleName, EntityLogicalName, LookupDict.Count, keys.Count);
 
         return result;
     }
@@ -106,6 +116,12 @@ public abstract class BaseModuleProcessor : IModuleProcessor
     {
         var result = new ModuleResult { ModuleName = ModuleName };
         var updateEntities = new List<Entity>();
+
+        // Track which source record produced each update entity so we can enrich
+        // any FailedRecord that comes back with the original AccountNumber + LoanIdentifier
+        // for the dead-letter writer. The update entity carries only Id + the column being
+        // updated, so without this map we'd lose that context at failure time.
+        var sourceByEntityId = new Dictionary<Guid, ConsumerCreditRecord>();
 
         foreach (var record in batch)
         {
@@ -127,6 +143,7 @@ public abstract class BaseModuleProcessor : IModuleProcessor
             if (!ShouldUpdate(existingEntity, record))
             {
                 // Match found but update condition not met — skip
+                // With a server-side GetPreWarmFilter, this branch should rarely fire.
                 result.RowsSkipped++;
                 continue;
             }
@@ -134,6 +151,7 @@ public abstract class BaseModuleProcessor : IModuleProcessor
             // Build the update entity
             var updateEntity = BuildUpdateEntity(existingEntity, record);
             updateEntities.Add(updateEntity);
+            sourceByEntityId[updateEntity.Id] = record;
             result.RowsProcessed++;
         }
 
@@ -141,14 +159,27 @@ public abstract class BaseModuleProcessor : IModuleProcessor
         if (updateEntities.Count > 0)
         {
             var (updated, failed, failures) = await Repository.BatchUpdateAsync(updateEntities, ct);
+
+            // Enrich each failure with the source AcctNum + LoanIdentifier so the
+            // dead-letter writer can populate the error table without re-deriving.
+            foreach (var failure in failures)
+            {
+                if (failure.Entity != null
+                    && sourceByEntityId.TryGetValue(failure.Entity.Id, out var src))
+                {
+                    failure.AccountNumber = src.AcctNum;
+                    failure.LoanIdentifier = src.LoanIdentifier;
+                }
+            }
+
             result.RowsUpdated += updated;
             result.RowsFailed += failed;
             result.Failures.AddRange(failures);
         }
 
         Logger.LogInformation(
-            "[{Module}] Batch: {Updated} updated, {Failed} failed, {Skipped} skipped",
-            ModuleName, result.RowsUpdated, result.RowsFailed, result.RowsSkipped);
+            "EventName={EventName} Module={Module} Updated={Updated} Failed={Failed} Skipped={Skipped}",
+            LogEvents.ModuleBatchComplete, ModuleName, result.RowsUpdated, result.RowsFailed, result.RowsSkipped);
 
         return result;
     }

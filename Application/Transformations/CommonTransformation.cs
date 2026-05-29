@@ -1,6 +1,6 @@
-using SqlToDataverseSync.Domain.Entities;
+using Fhn.Cdm.DataverseSync.Domain.Entities;
 
-namespace SqlToDataverseSync.Application.Transformations;
+namespace Fhn.Cdm.DataverseSync.Application.Transformations;
 
 /// <summary>
 /// Replaces the Access queries 001–005 with in-memory transformations.
