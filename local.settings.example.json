@@ -12,10 +12,10 @@
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
 
     "_comment_sql": "SQL connection. Locally: use a full connection string with credentials (as below). In Azure: omit credentials and rely on Managed Identity by setting Authentication=Active Directory Default — e.g. Server=YOUR_SQL_MI.database.windows.net;Database=YOUR_DB;Authentication=Active Directory Default;Encrypt=True; — Microsoft.Data.SqlClient resolves the token automatically; no code change is needed between environments.",
-    "SqlConnectionString": "Server=YOUR_SQL_MI.database.windows.net;Database=YOUR_DB;User Id=YOUR_USER;Password=YOUR_PASSWORD;Encrypt=True;TrustServerCertificate=True;",
+    "SqlConnectionString": "Server=tcp:<mi-hostname>,1433;Database=<db>;Encrypt=True;Authentication=Active Directory Managed Identity;User Id=<client-id-of-identity>;",
     "DataverseUrl": "https://YOUR_ORG.crm.dynamics.com",
 
-    "SyncScheduleCron": "0 0 2 * * *",
+    "SyncScheduleCron": "0 0 22 * * *",
 
     "SqlBatchSize": "10000",
     "DataverseBatchSize": "1000",
@@ -24,7 +24,7 @@
     "MaxConsecutiveFailureDays": "3",
 
     "_comment_tracking": "Tracking blob lives on the SyncStorage account (SyncStorage__blobServiceUri above) — a single identity grant covers tracking blob, dead-letter queue, and failure blob archive.",
-    "TrackingContainerName": "sync-state",
+    "TrackingContainerName": "cdm-tracking",
     "TrackingBlobName": "tracking.json",
 
     "ErrorTableEntityName": "crbee_consumercredit_errortable",
