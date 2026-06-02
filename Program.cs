@@ -29,7 +29,8 @@ var host = new HostBuilder()
         {
             SqlConnectionString = GetRequired("SqlConnectionString"),
             DataverseUrl = GetRequired("DataverseUrl"),
-            TrackingStorageAccountUrl = GetRequired("TrackingStorageAccountUrl"),
+            SyncStorageBlobServiceUri = GetRequired("SyncStorage__blobServiceUri"),
+            SyncStorageQueueServiceUri = GetRequired("SyncStorage__queueServiceUri"),
             TrackingContainerName = GetRequired("TrackingContainerName"),
             TrackingBlobName = GetRequired("TrackingBlobName"),
             ErrorTableEntityName = GetRequired("ErrorTableEntityName"),
@@ -45,20 +46,21 @@ var host = new HostBuilder()
         OverrideInt("MaxConsecutiveFailureDays", v => settings.MaxConsecutiveFailureDays = v);
         services.AddSingleton(settings);
 
-        // Identity-only storage auth. In Azure the deployed function's Managed
-        // Identity picks up the storage roles; locally `az login` / VS sign-in
-        // supplies the credential. ManagedIdentityCredential is excluded only in
-        // local dev so we don't waste time probing an IMDS endpoint that doesn't
-        // exist on a dev box (and can't accidentally pick up a stray VM/proxy
-        // identity that lacks the storage RBAC roles).
+        // Identity-based auth for the DATA storage account (SyncStorage — tracking
+        // blob, dead-letter queue, failure blob archive). AzureWebJobsStorage is
+        // the Functions HOST's default storage and uses a connection string; only
+        // this credential is used by the app-level SDK clients below.
+        // ManagedIdentityCredential is excluded locally so we don't probe an IMDS
+        // endpoint that doesn't exist on a dev box.
         var storageCredential = new DefaultAzureCredential(new DefaultAzureCredentialOptions
         {
             ExcludeManagedIdentityCredential = IsLocalDev()
         });
 
         // Storage Queue client used by QueueDeadLetterService to enqueue failed records.
-        // Endpoint is derived from TrackingStorageAccountUrl by swapping blob→queue, so
-        // tracking blob + dead-letter queue live on the same account (one identity grant).
+        // Endpoint comes from SyncStorage__queueServiceUri — the SAME named connection
+        // the DeadLetterProcessor QueueTrigger consumer binds to — so producer and
+        // consumer are guaranteed to share one queue (no chance of an account split).
         //
         // MessageEncoding = Base64: the WebJobs QueueTrigger extension expects
         // base64-encoded message bodies by default. Azure.Storage.Queues v12+ ships
@@ -67,23 +69,21 @@ var host = new HostBuilder()
         // delivery attempts. Setting Base64 here makes the producer match the trigger.
         services.AddSingleton(_ =>
         {
-            var queueServiceUri = new Uri(
-                settings.TrackingStorageAccountUrl
-                    .Replace(".blob.core.windows.net", ".queue.core.windows.net"));
             var serviceClient = new QueueServiceClient(
-                queueServiceUri,
+                new Uri(settings.SyncStorageQueueServiceUri),
                 storageCredential,
                 new QueueClientOptions { MessageEncoding = QueueMessageEncoding.Base64 });
             return serviceClient.GetQueueClient(settings.DeadLetterQueueName);
         });
 
         // Blob container holding the durable archive of records that exhausted all
-        // queue retries (one blob per record, date-partitioned). Same storage account
-        // as tracking/queue — single identity grant covers everything.
+        // queue retries (one blob per record, date-partitioned). Same SyncStorage
+        // account as the tracking blob + dead-letter queue — one identity grant covers
+        // everything.
         services.AddSingleton(_ =>
         {
             var blobServiceClient = new BlobServiceClient(
-                new Uri(settings.TrackingStorageAccountUrl), storageCredential);
+                new Uri(settings.SyncStorageBlobServiceUri), storageCredential);
             return blobServiceClient.GetBlobContainerClient(settings.FailureBlobContainerName);
         });
 

@@ -41,7 +41,7 @@ public class BlobTrackingService : ITrackingService
             StringComparison.OrdinalIgnoreCase);
 
         var serviceClient = new BlobServiceClient(
-            new Uri(settings.TrackingStorageAccountUrl),
+            new Uri(settings.SyncStorageBlobServiceUri),
             new DefaultAzureCredential(new DefaultAzureCredentialOptions
             {
                 ExcludeManagedIdentityCredential = isLocalDev
