@@ -36,6 +36,7 @@ public static class LogEvents
     // ── Pre-warm / SQL key stream ───────────────────────────────────────
     public const string PreWarmStarted = nameof(PreWarmStarted);
     public const string PreWarmComplete = nameof(PreWarmComplete);
+    public const string PreWarmPartialFailure = nameof(PreWarmPartialFailure);
     public const string PreWarmAborted = nameof(PreWarmAborted);
     public const string PreWarmChunk = nameof(PreWarmChunk);
     public const string PreWarmQueryStarted = nameof(PreWarmQueryStarted);

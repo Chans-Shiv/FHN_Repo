@@ -20,6 +20,7 @@
     "SqlBatchSize": "10000",
     "DataverseBatchSize": "1000",
     "MaxParallelBatches": "5",
+    "_comment_prewarm": "PreWarmParallelism = concurrent Dataverse lookup queries per module during pre-warm. Pre-warm failure is per-module and isolated: a module whose pre-warm fails is skipped for that run and retried on the next scheduled run (it is NOT marked complete, so it stays pending). Modules whose pre-warm succeeds proceed to insert/update normally. The whole sync only aborts when EVERY pending module's pre-warm fails.",
     "PreWarmParallelism": "10",
     "MaxConsecutiveFailureDays": "3",
 
