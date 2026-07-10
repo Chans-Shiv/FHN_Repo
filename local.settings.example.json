@@ -2,32 +2,35 @@
   "_comment": "Copy this file to local.settings.json and fill in real values. local.settings.json is gitignored.",
   "IsEncrypted": false,
   "Values": {
-    "_comment_storage": "Identity-only storage auth. Set the two __serviceUri keys (not a connection string) and grant your local AAD user 'Storage Blob Data Contributor' + 'Storage Queue Data Contributor' on the account; the Functions host hits storage via DefaultAzureCredential. In Azure these come from the Function App's Managed Identity. AZURE_FUNCTIONS_ENVIRONMENT=Development tells our client wiring to skip the IMDS probe locally.",
-    "AzureWebJobsStorage__blobServiceUri": "https://YOUR_STORAGE.blob.core.windows.net",
-    "AzureWebJobsStorage__queueServiceUri": "https://YOUR_STORAGE.queue.core.windows.net",
+    "_comment_storage": "TWO storage connections. AzureWebJobsStorage = Functions HOST plumbing only (trigger receipts, internal control queues, host leases). Locally use the Azurite emulator (UseDevelopmentStorage=true); in Azure set this to the Function App's DEFAULT storage account connection string. SyncStorage = the DATA account: dead-letter queue (producer + QueueTrigger consumer), tracking blob, and failure blob archive. Identity-based via DefaultAzureCredential — grant 'Storage Blob Data Contributor' + 'Storage Queue Data Contributor' on this account. AZURE_TOKEN_CREDENTIALS=dev restricts the Functions host's credential chain to non-IMDS developer credentials (az login, VS sign-in) locally so it doesn't probe an IMDS endpoint that doesn't exist on a dev box.",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "SyncStorage__blobServiceUri": "https://YOUR_STORAGE.blob.core.windows.net",
+    "SyncStorage__queueServiceUri": "https://YOUR_STORAGE.queue.core.windows.net",
+    "AZURE_TOKEN_CREDENTIALS": "dev",
     "AZURE_FUNCTIONS_ENVIRONMENT": "Development",
 
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
 
-    "SqlConnectionString": "Server=YOUR_SQL_MI.database.windows.net;Database=YOUR_DB;User Id=YOUR_USER;Password=YOUR_PASSWORD;Encrypt=True;TrustServerCertificate=True;",
+    "_comment_sql": "SQL connection. Locally: use a full connection string with credentials (as below). In Azure: omit credentials and rely on Managed Identity by setting Authentication=Active Directory Default — e.g. Server=YOUR_SQL_MI.database.windows.net;Database=YOUR_DB;Authentication=Active Directory Default;Encrypt=True; — Microsoft.Data.SqlClient resolves the token automatically; no code change is needed between environments.",
+    "SqlConnectionString": "Server=tcp:<mi-hostname>,1433;Database=<db>;Encrypt=True;Authentication=Active Directory Managed Identity;User Id=<client-id-of-identity>;",
     "DataverseUrl": "https://YOUR_ORG.crm.dynamics.com",
 
-    "SyncScheduleCron": "0 0 2 * * *",
+    "SyncScheduleCron": "0 0 22 * * *",
 
     "SqlBatchSize": "10000",
     "DataverseBatchSize": "1000",
     "MaxParallelBatches": "5",
+    "_comment_prewarm": "PreWarmParallelism = concurrent Dataverse lookup queries per module during pre-warm. Pre-warm failure is per-module and isolated: a module whose pre-warm fails is skipped for that run and retried on the next scheduled run (it is NOT marked complete, so it stays pending). Modules whose pre-warm succeeds proceed to insert/update normally. The whole sync only aborts when EVERY pending module's pre-warm fails.",
     "PreWarmParallelism": "10",
     "MaxConsecutiveFailureDays": "3",
 
-    "_comment_tracking": "Endpoint hit by DefaultAzureCredential for the tracking blob. Same storage account as the queue + AzureWebJobsStorage so a single identity grant covers everything.",
-    "TrackingStorageAccountUrl": "https://YOUR_STORAGE.blob.core.windows.net",
-    "TrackingContainerName": "sync-state",
+    "_comment_tracking": "Tracking blob lives on the SyncStorage account (SyncStorage__blobServiceUri above) — a single identity grant covers tracking blob, dead-letter queue, and failure blob archive.",
+    "TrackingContainerName": "cdm-tracking",
     "TrackingBlobName": "tracking.json",
 
     "ErrorTableEntityName": "crbee_consumercredit_errortable",
 
-    "_comment_deadletter": "Storage Queue buffers failed records before they're written to the Dataverse error table. The QueueTrigger listener for DeadLetterProcessor reads from AzureWebJobsStorage (identity-bound), so the queue must live on the SAME storage account the __queueServiceUri above points to. DeadLetterMaxAttempts is NOT set here — Program.cs reads extensions.queues.maxDequeueCount from host.json so the two can't drift.",
+    "_comment_deadletter": "Storage Queue buffers failed records before they're written to the Dataverse error table. The QueueTrigger listener for DeadLetterProcessor binds to SyncStorage (not AzureWebJobsStorage), so the queue must live on the same account SyncStorage__queueServiceUri points to. DeadLetterMaxAttempts is NOT set here — Program.cs reads extensions.queues.maxDequeueCount from host.json so the two can't drift.",
     "DeadLetterQueueName": "dead-letter-errors",
 
     "_comment_failureblob": "When all queue retries are exhausted, one blob per record is archived under errors/yyyy/MM/dd/{invocationId}-{key}.json. Same storage account as the queue.",

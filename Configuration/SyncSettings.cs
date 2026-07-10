@@ -33,8 +33,22 @@ public class SyncSettings
     /// <summary>Maximum consecutive days of same-hash failures before dead-lettering.</summary>
     public int MaxConsecutiveFailureDays { get; set; } = 3;
 
-    /// <summary>HTTPS endpoint of the storage account hosting tracking.json (e.g., https://acct.blob.core.windows.net).</summary>
-    public required string TrackingStorageAccountUrl { get; set; }
+    /// <summary>
+    /// Blob endpoint of the DATA storage account ("SyncStorage", e.g.
+    /// https://acct.blob.core.windows.net). Single source of truth for every
+    /// identity-based blob client: the tracking blob and the failure blob archive.
+    /// Sourced from the <c>SyncStorage__blobServiceUri</c> setting — the same named
+    /// connection the dead-letter QueueTrigger binds to — so producer and consumer
+    /// can never point at different accounts.
+    /// </summary>
+    public required string SyncStorageBlobServiceUri { get; set; }
+
+    /// <summary>
+    /// Queue endpoint of the DATA storage account ("SyncStorage", e.g.
+    /// https://acct.queue.core.windows.net). Used by the dead-letter queue producer;
+    /// the QueueTrigger consumer binds to the same <c>SyncStorage</c> connection.
+    /// </summary>
+    public required string SyncStorageQueueServiceUri { get; set; }
 
     /// <summary>Container holding the tracking blob. Created on first save if it doesn't exist.</summary>
     public required string TrackingContainerName { get; set; }

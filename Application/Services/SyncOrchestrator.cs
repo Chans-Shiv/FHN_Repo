@@ -226,16 +226,28 @@ public class SyncOrchestrator
             }
         }).ToList();
 
-        await Task.WhenAll(preWarmTasks);
-
-        // If any pre-warm fails we don't have a valid lookup dict for that module.
-        // The staging track is still safe to run (it doesn't depend on pre-warm),
-        // but we abort the entire sync so the failure is surfaced loudly — proceeding
-        // would silently skip every record for the failed module.
         var preWarmResults = await Task.WhenAll(preWarmTasks);
         var preWarmFailed = preWarmResults.Where(r => !r.Ok).Select(r => r.Module).ToList();
+        var failedSet = preWarmFailed.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Continue with only the modules whose pre-warm succeeded. A failed module is skipped
+        // this run — NOT marked complete — so it carries forward its prior tracking state and
+        // is retried next run. It MUST be excluded from Phase 4: an empty LookupDict would skip
+        // every record, report zero failures, and falsely mark the module complete for the month.
+        var activeProcessors = pendingProcessors.Where(p => !failedSet.Contains(p.ModuleName)).ToList();
+
         if (preWarmFailed.Count > 0)
+            _logger.LogError(
+                "EventName={EventName} FailedModules={Failed} ContinuingModules={Active}",
+                LogEvents.PreWarmPartialFailure,
+                string.Join(",", preWarmFailed),
+                string.Join(",", activeProcessors.Select(p => p.ModuleName)));
+
+        if (activeProcessors.Count == 0)
         {
+            // Every pending module's pre-warm failed — nothing safe to process. Return without
+            // saving tracking: prior state is unchanged, so all modules stay pending and the
+            // next run retries them in full. (Per-module errors are already in result.Errors.)
             _logger.LogCritical(
                 "EventName={EventName} FailedModules={Modules} Action=AbortSync",
                 LogEvents.PreWarmAborted, string.Join(",", preWarmFailed));
@@ -246,7 +258,7 @@ public class SyncOrchestrator
 
         _logger.LogInformation(
             "EventName={EventName} ActiveProcessors={Count}",
-            LogEvents.Phase3Complete, pendingProcessors.Count);
+            LogEvents.Phase3Complete, activeProcessors.Count);
 
         // ═══════════════════════════════════════════════
         // PHASE 4: Stream SQL → run module processors per batch
@@ -254,9 +266,9 @@ public class SyncOrchestrator
         var phase4Sw = Stopwatch.StartNew();
         _logger.LogInformation(
             "EventName={EventName} ActiveProcessors={ModuleCount} SqlBatchSize={SqlBatchSize}",
-            LogEvents.Phase4Started, pendingProcessors.Count, _settings.SqlBatchSize);
+            LogEvents.Phase4Started, activeProcessors.Count, _settings.SqlBatchSize);
 
-        var (moduleResults, totalRowsRead) = await ExecuteModulesTrackAsync(maxMthKey, pendingProcessors, ct);
+        var (moduleResults, totalRowsRead) = await ExecuteModulesTrackAsync(maxMthKey, activeProcessors, ct);
 
         // Fold module results into the SyncResult.
         foreach (var kvp in moduleResults)
