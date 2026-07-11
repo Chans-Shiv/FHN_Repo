@@ -11,11 +11,10 @@ namespace Fhn.Cdm.DataverseSync.Configuration;
 /// </summary>
 public class SyncSettings
 {
-    public required string SqlConnectionString { get; set; }
     public required string DataverseUrl { get; set; }
 
-    /// <summary>Rows buffered from SQL before passing to processors. Default: 10,000.</summary>
-    public int SqlBatchSize { get; set; } = 10_000;
+    /// <summary>Rows buffered from the Excel workbook before passing to processors. Default: 10,000.</summary>
+    public int ExcelBatchSize { get; set; } = 10_000;
 
     /// <summary>Max records per Dataverse ExecuteMultipleRequest. API hard limit: 1,000.</summary>
     public int DataverseBatchSize { get; set; } = 1_000;
@@ -29,9 +28,6 @@ public class SyncSettings
     /// running them sequentially was the main source of "stuck at Phase 3" stalls.
     /// </summary>
     public int PreWarmParallelism { get; set; } = 10;
-
-    /// <summary>Maximum consecutive days of same-hash failures before dead-lettering.</summary>
-    public int MaxConsecutiveFailureDays { get; set; } = 3;
 
     /// <summary>
     /// Blob endpoint of the DATA storage account ("SyncStorage", e.g.
@@ -49,12 +45,6 @@ public class SyncSettings
     /// the QueueTrigger consumer binds to the same <c>SyncStorage</c> connection.
     /// </summary>
     public required string SyncStorageQueueServiceUri { get; set; }
-
-    /// <summary>Container holding the tracking blob. Created on first save if it doesn't exist.</summary>
-    public required string TrackingContainerName { get; set; }
-
-    /// <summary>Blob name for the serialized TrackingState.</summary>
-    public required string TrackingBlobName { get; set; }
 
     /// <summary>
     /// Logical name of the Dataverse error table that receives one row per failed

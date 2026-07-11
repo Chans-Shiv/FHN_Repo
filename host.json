@@ -6,7 +6,6 @@
   },
   "functionTimeout": "04:00:00",
   "extensions": {
-    "timers": { "isPersistentTimerEnabled": true },
     "queues": { "maxDequeueCount": 5 }
   }
 }

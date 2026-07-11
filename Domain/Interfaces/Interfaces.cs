@@ -5,19 +5,21 @@ using Fhn.Cdm.DataverseSync.Domain.Models;
 
 namespace Fhn.Cdm.DataverseSync.Domain.Interfaces;
 
-/// <summary>Streams rows from SQL MI in batches. Never loads full result set.</summary>
-public interface ISqlDataReader
+/// <summary>
+/// Streams rows from a CDM .xlsx workbook in batches. Never loads the full sheet.
+/// The blob-triggered replacement for the old SQL MI source — same row shape, so
+/// every downstream phase is unchanged.
+/// </summary>
+public interface IExcelDataReader
 {
-    Task<long> GetRowCountForMthKeyAsync(int mthKey, CancellationToken ct = default);
-
     /// <summary>
-    /// Yields raw ACCT_NUM values one at a time for the given MTH_KEY. Used by the
-    /// streaming pipeline to build the pre-warm match-key set without loading full rows.
+    /// Yields raw ACCT_NUM values one at a time. Used by the streaming pipeline to build
+    /// the pre-warm match-key set without loading full rows.
     /// </summary>
-    IAsyncEnumerable<string> StreamAccountNumbersAsync(int mthKey, CancellationToken ct = default);
+    IEnumerable<string> StreamAccountNumbers(string xlsxPath);
 
-    IAsyncEnumerable<List<Dictionary<string, object?>>> StreamBatchesAsync(
-        int mthKey, int batchSize, CancellationToken ct = default);
+    /// <summary>Yields the sheet in batches, each row keyed by column name.</summary>
+    IEnumerable<List<Dictionary<string, object?>>> StreamBatches(string xlsxPath, int batchSize);
 }
 
 /// <summary>CRUD operations against Dataverse with batch support and retry.</summary>
@@ -40,13 +42,6 @@ public interface IModuleProcessor
     Task<ModuleResult> PreWarmAsync(IReadOnlyCollection<string> matchKeys, CancellationToken ct = default);
     Task<ModuleResult> ProcessBatchAsync(List<ConsumerCreditRecord> batch, CancellationToken ct = default);
     Task FlushAsync(CancellationToken ct = default);
-}
-
-/// <summary>Tracks sync state across daily runs (row counts, failure hashes).</summary>
-public interface ITrackingService
-{
-    Task<TrackingState> LoadAsync(CancellationToken ct = default);
-    Task SaveAsync(TrackingState state, CancellationToken ct = default);
 }
 
 /// <summary>Persists permanently failed records for manual review.</summary>

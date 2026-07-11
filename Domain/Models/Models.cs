@@ -49,18 +49,6 @@ public class FailedRecord
 }
 
 /// <summary>
-/// Persisted state tracking sync progress across daily runs.
-/// Stored as JSON in /home/data/tracking.json.
-/// </summary>
-public class TrackingState
-{
-    public string Month { get; set; } = string.Empty;
-    public long SqlRowCount { get; set; }
-    public DateTime LastRunDate { get; set; }
-    public Dictionary<string, ModuleTrackingState> Modules { get; set; } = new();
-}
-
-/// <summary>
 /// Wire format for one failed record in the dead-letter queue.
 /// Each message is processed independently by <c>DeadLetterProcessorFunction</c>.
 /// </summary>
@@ -74,29 +62,4 @@ public class DeadLetterMessage
     public int? LoanIdentifier { get; set; }
     public string ErrorMessage { get; set; } = string.Empty;
     public DateTimeOffset EnqueuedAt { get; set; }
-}
-
-public class ModuleTrackingState
-{
-    public int SuccessCount { get; set; }
-    public int ConsecutiveFailureDays { get; set; }
-    public string? LastFailureDate { get; set; }
-    public string? LastFailedHash { get; set; }
-    public List<string> LastFailedKeys { get; set; } = new();
-
-    /// <summary>Set when MaxConsecutiveFailureDays is reached. Subsequent scheduled runs skip this module.</summary>
-    public DateTime? AbandonedAt { get; set; }
-
-    /// <summary>
-    /// MTH_KEY of the month this module last finished cleanly (RowsFailed=0 AND saw every SQL row).
-    /// Combined with <see cref="LastCompletedSqlRowCount"/>, subsequent runs skip this module until
-    /// the month rolls over or the SQL row count changes.
-    /// </summary>
-    public string? LastCompletedMonth { get; set; }
-
-    /// <summary>
-    /// SQL row count at the time <see cref="LastCompletedMonth"/> was recorded. If SQL grows
-    /// mid-month (upstream re-load), this won't match the current count and the module re-runs.
-    /// </summary>
-    public long? LastCompletedSqlRowCount { get; set; }
 }

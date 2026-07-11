@@ -2,7 +2,7 @@
   "_comment": "Copy this file to local.settings.json and fill in real values. local.settings.json is gitignored.",
   "IsEncrypted": false,
   "Values": {
-    "_comment_storage": "TWO storage connections. AzureWebJobsStorage = Functions HOST plumbing only (trigger receipts, internal control queues, host leases). Locally use the Azurite emulator (UseDevelopmentStorage=true); in Azure set this to the Function App's DEFAULT storage account connection string. SyncStorage = the DATA account: dead-letter queue (producer + QueueTrigger consumer), tracking blob, and failure blob archive. Identity-based via DefaultAzureCredential — grant 'Storage Blob Data Contributor' + 'Storage Queue Data Contributor' on this account. AZURE_TOKEN_CREDENTIALS=dev restricts the Functions host's credential chain to non-IMDS developer credentials (az login, VS sign-in) locally so it doesn't probe an IMDS endpoint that doesn't exist on a dev box.",
+    "_comment_storage": "TWO storage connections. AzureWebJobsStorage = Functions HOST plumbing only (blob-trigger receipts, internal control queues, host leases). Locally use the Azurite emulator (UseDevelopmentStorage=true); in Azure set this to the Function App's DEFAULT storage account connection string. SyncStorage = the DATA account: the blob-trigger source (cdm-landing container), the dead-letter queue (producer + QueueTrigger consumer), and the failure blob archive. Identity-based via DefaultAzureCredential — grant 'Storage Blob Data Contributor' + 'Storage Queue Data Contributor' on this account. AZURE_TOKEN_CREDENTIALS=dev restricts the Functions host's credential chain to non-IMDS developer credentials (az login, VS sign-in) locally so it doesn't probe an IMDS endpoint that doesn't exist on a dev box.",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "SyncStorage__blobServiceUri": "https://YOUR_STORAGE.blob.core.windows.net",
     "SyncStorage__queueServiceUri": "https://YOUR_STORAGE.queue.core.windows.net",
@@ -11,22 +11,14 @@
 
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
 
-    "_comment_sql": "SQL connection. Locally: use a full connection string with credentials (as below). In Azure: omit credentials and rely on Managed Identity by setting Authentication=Active Directory Default — e.g. Server=YOUR_SQL_MI.database.windows.net;Database=YOUR_DB;Authentication=Active Directory Default;Encrypt=True; — Microsoft.Data.SqlClient resolves the token automatically; no code change is needed between environments.",
-    "SqlConnectionString": "Server=tcp:<mi-hostname>,1433;Database=<db>;Encrypt=True;Authentication=Active Directory Managed Identity;User Id=<client-id-of-identity>;",
+    "_comment_source": "Data source is now a blob-triggered Excel workbook, not SQL. Drop a CDM snapshot .xlsx into the 'cdm-landing' container on the SyncStorage account and the CdmDataverseSync function fires automatically. The header row's column names must match the SQL projection 1:1 (MTH_KEY, ACCT_NUM, ACCT_ID, ACCT_KEY, Balance, ChargeOffIndicator, CostCenter, CustomerName, CollAddr, CollCity, CollState, CollZip, CustStreetAddress, CustCity, CustState, CustZip, LoanIdentifier, SourceSystem, Product).",
     "DataverseUrl": "https://YOUR_ORG.crm.dynamics.com",
 
-    "SyncScheduleCron": "0 0 22 * * *",
-
-    "SqlBatchSize": "10000",
+    "ExcelBatchSize": "10000",
     "DataverseBatchSize": "1000",
     "MaxParallelBatches": "5",
-    "_comment_prewarm": "PreWarmParallelism = concurrent Dataverse lookup queries per module during pre-warm. Pre-warm failure is per-module and isolated: a module whose pre-warm fails is skipped for that run and retried on the next scheduled run (it is NOT marked complete, so it stays pending). Modules whose pre-warm succeeds proceed to insert/update normally. The whole sync only aborts when EVERY pending module's pre-warm fails.",
+    "_comment_prewarm": "PreWarmParallelism = concurrent Dataverse lookup queries per module during pre-warm. Pre-warm failure is per-module and isolated: a module whose pre-warm fails is skipped for this file (it is NOT processed in Phase 4). Modules whose pre-warm succeeds proceed to update normally. The whole sync only aborts when EVERY module's pre-warm fails.",
     "PreWarmParallelism": "10",
-    "MaxConsecutiveFailureDays": "3",
-
-    "_comment_tracking": "Tracking blob lives on the SyncStorage account (SyncStorage__blobServiceUri above) — a single identity grant covers tracking blob, dead-letter queue, and failure blob archive.",
-    "TrackingContainerName": "cdm-tracking",
-    "TrackingBlobName": "tracking.json",
 
     "ErrorTableEntityName": "crbee_consumercredit_errortable",
 

@@ -11,10 +11,15 @@ namespace Fhn.Cdm.DataverseSync.Diagnostics;
 /// </summary>
 public static class LogEvents
 {
+    // ── Blob trigger / Excel source ─────────────────────────────────────
+    public const string BlobTriggerStarted = nameof(BlobTriggerStarted);
+    public const string BlobTriggerCompleted = nameof(BlobTriggerCompleted);
+    public const string BlobTriggerFailed = nameof(BlobTriggerFailed);
+    public const string ExcelReadStarted = nameof(ExcelReadStarted);
+    public const string ExcelBatchYielded = nameof(ExcelBatchYielded);
+    public const string ExcelStreamComplete = nameof(ExcelStreamComplete);
+
     // ── Sync orchestration ──────────────────────────────────────────────
-    public const string Phase1Started = nameof(Phase1Started);
-    public const string Phase1SqlRowCount = nameof(Phase1SqlRowCount);
-    public const string Phase1Exit = nameof(Phase1Exit);
     public const string Phase2KeysStarted = nameof(Phase2KeysStarted);
     public const string Phase2KeysComplete = nameof(Phase2KeysComplete);
     public const string Phase3Started = nameof(Phase3Started);

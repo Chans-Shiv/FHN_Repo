@@ -12,8 +12,7 @@ using Fhn.Cdm.DataverseSync.Configuration;
 using Fhn.Cdm.DataverseSync.Domain.Interfaces;
 using Fhn.Cdm.DataverseSync.Infrastructure.Dataverse;
 using Fhn.Cdm.DataverseSync.Infrastructure.DeadLetter;
-using Fhn.Cdm.DataverseSync.Infrastructure.SqlMi;
-using Fhn.Cdm.DataverseSync.Infrastructure.Tracking;
+using Fhn.Cdm.DataverseSync.Infrastructure.Excel;
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
@@ -27,23 +26,19 @@ var host = new HostBuilder()
         // defaults and only get overridden when explicitly set.
         var settings = new SyncSettings
         {
-            SqlConnectionString = GetRequired("SqlConnectionString"),
             DataverseUrl = GetRequired("DataverseUrl"),
             SyncStorageBlobServiceUri = GetRequired("SyncStorage__blobServiceUri"),
             SyncStorageQueueServiceUri = GetRequired("SyncStorage__queueServiceUri"),
-            TrackingContainerName = GetRequired("TrackingContainerName"),
-            TrackingBlobName = GetRequired("TrackingBlobName"),
             ErrorTableEntityName = GetRequired("ErrorTableEntityName"),
             DeadLetterQueueName = GetRequired("DeadLetterQueueName"),
             FailureBlobContainerName = GetRequired("FailureBlobContainerName"),
             // Pulled from host.json below — see ReadHostJsonMaxDequeueCount.
             DeadLetterMaxAttempts = ReadHostJsonMaxDequeueCount(),
         };
-        OverrideInt("SqlBatchSize", v => settings.SqlBatchSize = v);
+        OverrideInt("ExcelBatchSize", v => settings.ExcelBatchSize = v);
         OverrideInt("DataverseBatchSize", v => settings.DataverseBatchSize = v);
         OverrideInt("MaxParallelBatches", v => settings.MaxParallelBatches = v);
         OverrideInt("PreWarmParallelism", v => settings.PreWarmParallelism = v);
-        OverrideInt("MaxConsecutiveFailureDays", v => settings.MaxConsecutiveFailureDays = v);
         services.AddSingleton(settings);
 
         // Identity-based auth for the DATA storage account (SyncStorage — tracking
@@ -89,9 +84,8 @@ var host = new HostBuilder()
 
         // ── Infrastructure (external dependencies) ──
         services.AddSingleton<DataverseConnectionFactory>();
-        services.AddTransient<ISqlDataReader, SqlMiDataReader>();
+        services.AddTransient<IExcelDataReader, CdmExcelReader>();
         services.AddTransient<IDataverseRepository, DataverseRepository>();
-        services.AddTransient<ITrackingService, BlobTrackingService>();
 
         // Dead-letter pipeline:
         //   Orchestrator → IDeadLetterService (QueueDeadLetterService) → Storage Queue
